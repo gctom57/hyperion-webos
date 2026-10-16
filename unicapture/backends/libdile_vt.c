@@ -72,7 +72,13 @@ int capture_init(cap_backend_config_t* config, void** state_p)
 
     INFO("Capture start called.");
 
-    if (HAS_QUIRK(config->quirks, QUIRK_DILE_VT_CREATE_EX)) {
+    // DILE_VT_CreateEx is a weak symbol that older libdile_vt builds lack;
+    // calling it there would jump to NULL
+    if (HAS_QUIRK(config->quirks, QUIRK_DILE_VT_CREATE_EX) && DILE_VT_CreateEx == NULL) {
+        WARN("[QUIRK_DILE_VT_CREATE_EX]: DILE_VT_CreateEx not available on this TV, using DILE_VT_Create");
+    }
+
+    if (HAS_QUIRK(config->quirks, QUIRK_DILE_VT_CREATE_EX) && DILE_VT_CreateEx != NULL) {
         INFO("[QUIRK_DILE_VT_CREATE_EX]: Attempting DILE_VT_CreateEx...");
         vth = DILE_VT_CreateEx(0, 1);
     } else {

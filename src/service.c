@@ -61,6 +61,12 @@ static void* hdr_worker(void* data __attribute__((unused)))
 
 static void queue_hdr_state(service_t* service, DynamicRange range)
 {
+    // Nothing to tell HyperHDR until a receiver address is configured
+    if (!service->settings->unix_socket && (service->settings->address == NULL || service->settings->address[0] == '\0')) {
+        DBG("No receiver address set, not sending HDR state");
+        return;
+    }
+
     pthread_mutex_lock(&hdr_lock);
 
     // Copied here, on the main loop, because setSettings may free the address later
