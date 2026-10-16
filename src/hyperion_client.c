@@ -250,8 +250,14 @@ int _connect_unix_socket(const char* hostname)
 
     memset(&serv_addr_un, 0, sizeof(serv_addr_un));
 
+    size_t path_len = strlen(hostname);
+    if (path_len == 0 || path_len >= sizeof(serv_addr_un.sun_path)) {
+        WARN("Unix socket path length %zu is invalid (max %zu)", path_len, sizeof(serv_addr_un.sun_path) - 1);
+        return 1;
+    }
+
     serv_addr_un.sun_family = AF_LOCAL;
-    strcpy(serv_addr_un.sun_path, hostname);
+    memcpy(serv_addr_un.sun_path, hostname, path_len + 1);
 
     if (connect(sockfd, (struct sockaddr*)&serv_addr_un, sizeof(serv_addr_un)) < 0) {
         WARN("connect() to unix socket %s failed: %s", hostname, strerror(errno));

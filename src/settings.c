@@ -1,5 +1,117 @@
 #include "settings.h"
+#include "log.h"
+#include <arpa/inet.h>
 #include <stdio.h>
+#include <string.h>
+#include <sys/un.h>
+
+const char* const settings_ui_backends[] = { "libgm", "libhalgal", NULL };
+const char* const settings_video_backends[] = { "libvtcapture", "libdile_vt", NULL };
+
+bool settings_backend_allowed(const char* name, const char* const* allowed)
+{
+    if (name == NULL || name[0] == '\0' || strcmp(name, "auto") == 0) {
+        return true;
+    }
+
+    for (int i = 0; allowed[i] != NULL; i++) {
+        if (strcmp(name, allowed[i]) == 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool settings_address_valid(const char* address, bool unix_socket)
+{
+    if (address == NULL || address[0] == '\0') {
+        return true;
+    }
+
+    if (unix_socket) {
+        // Must fit sockaddr_un.sun_path including the terminator
+        return address[0] == '/' && strlen(address) < sizeof(((struct sockaddr_un*)0)->sun_path);
+    }
+
+    struct in_addr addr;
+    return inet_pton(AF_INET, address, &addr) == 1;
+}
+
+static bool json_string_field(jvalue_ref source, const char* key, raw_buffer* out)
+{
+    jvalue_ref value = jobject_get(source, j_cstr_to_buffer(key));
+    if (!value || !jis_string(value)) {
+        return false;
+    }
+
+    *out = jstring_get(value);
+    return true;
+}
+
+static bool json_int_in_range(jvalue_ref source, const char* key, int min, int max)
+{
+    jvalue_ref value = jobject_get(source, j_cstr_to_buffer(key));
+    if (!value || !jis_number(value)) {
+        return true;
+    }
+
+    int number;
+    if (jnumber_get_i32(value, &number) != CONV_OK || number < min || number > max) {
+        WARN("Settings: %s out of range (%d..%d)", key, min, max);
+        return false;
+    }
+
+    return true;
+}
+
+static bool settings_validate_json(settings_t* settings, jvalue_ref source)
+{
+    bool valid = true;
+    raw_buffer str;
+
+    if (json_string_field(source, "backend", &str)) {
+        if (!settings_backend_allowed(str.m_str, settings_video_backends)) {
+            WARN("Settings: unknown video backend: %s", str.m_str);
+            valid = false;
+        }
+        jstring_free_buffer(str);
+    }
+
+    if (json_string_field(source, "uibackend", &str)) {
+        if (!settings_backend_allowed(str.m_str, settings_ui_backends)) {
+            WARN("Settings: unknown UI backend: %s", str.m_str);
+            valid = false;
+        }
+        jstring_free_buffer(str);
+    }
+
+    // Validate the address against the unix-socket flag it will be used with
+    bool unix_socket = settings->unix_socket;
+    jvalue_ref value = jobject_get(source, j_cstr_to_buffer("unix-socket"));
+    if (value && jis_boolean(value)) {
+        jboolean_get(value, &unix_socket);
+    }
+
+    if (json_string_field(source, "address", &str)) {
+        if (!settings_address_valid(str.m_str, unix_socket)) {
+            WARN("Settings: invalid %s address", unix_socket ? "unix socket" : "IPv4");
+            valid = false;
+        }
+        jstring_free_buffer(str);
+    } else if (value && !settings_address_valid(settings->address, unix_socket)) {
+        WARN("Settings: current address is not valid for the new unix-socket setting");
+        valid = false;
+    }
+
+    valid = json_int_in_range(source, "port", 1, 65535) && valid;
+    valid = json_int_in_range(source, "priority", 0, 255) && valid;
+    valid = json_int_in_range(source, "fps", 0, 240) && valid;
+    valid = json_int_in_range(source, "width", 16, 3840) && valid;
+    valid = json_int_in_range(source, "height", 16, 2160) && valid;
+
+    return valid;
+}
 
 void settings_init(settings_t* settings)
 {
@@ -31,6 +143,11 @@ void settings_init(settings_t* settings)
 int settings_load_json(settings_t* settings, jvalue_ref source)
 {
     jvalue_ref value;
+
+    // All-or-nothing: reject the whole payload before touching any field
+    if (!settings_validate_json(settings, source)) {
+        return -1;
+    }
 
     if ((value = jobject_get(source, j_cstr_to_buffer("backend"))) && jis_string(value)) {
         free(settings->video_backend);

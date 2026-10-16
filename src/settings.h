@@ -34,7 +34,13 @@ typedef struct _settings_t {
     bool no_powerstate;
 } settings_t;
 
+extern const char* const settings_ui_backends[];
+extern const char* const settings_video_backends[];
+
 void settings_init(settings_t*);
+
+bool settings_backend_allowed(const char* name, const char* const* allowed);
+bool settings_address_valid(const char* address, bool unix_socket);
 
 int settings_load_json(settings_t* settings, jvalue_ref source);
 int settings_save_json(settings_t* settings, jvalue_ref target);
