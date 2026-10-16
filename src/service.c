@@ -24,6 +24,65 @@ extern bool LSRegisterPubPriv(const char* name, LSHandle** sh,
     bool public_bus,
     LSError* lserror) __attribute__((weak));
 
+/*
+ * HDR state is pushed to HyperHDR over HTTP, which can take up to the client
+ * timeout. Luna callbacks only queue the latest request; a worker thread sends
+ * it, so the main loop (and with it every Luna method) never blocks.
+ */
+static pthread_mutex_t hdr_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t hdr_cond = PTHREAD_COND_INITIALIZER;
+static bool hdr_thread_started = false;
+static bool hdr_pending = false;
+static DynamicRange hdr_range = SDR;
+static char hdr_host[64];
+
+static void* hdr_worker(void* data __attribute__((unused)))
+{
+    char host[sizeof(hdr_host)];
+
+    while (true) {
+        pthread_mutex_lock(&hdr_lock);
+        while (!hdr_pending) {
+            pthread_cond_wait(&hdr_cond, &hdr_lock);
+        }
+        memcpy(host, hdr_host, sizeof(host));
+        DynamicRange range = hdr_range;
+        hdr_pending = false;
+        pthread_mutex_unlock(&hdr_lock);
+
+        int ret = set_hdr_state(host, RPC_PORT, range);
+        if (ret != 0) {
+            ERR("hdr_worker: set_hdr_state failed, ret: %d", ret);
+        }
+    }
+
+    return NULL;
+}
+
+static void queue_hdr_state(service_t* service, DynamicRange range)
+{
+    pthread_mutex_lock(&hdr_lock);
+
+    // Copied here, on the main loop, because setSettings may free the address later
+    snprintf(hdr_host, sizeof(hdr_host), "%s", service->settings->unix_socket ? "127.0.0.1" : service->settings->address);
+    hdr_range = range;
+    hdr_pending = true;
+
+    if (!hdr_thread_started) {
+        pthread_t thread;
+        if (pthread_create(&thread, NULL, hdr_worker, NULL) == 0) {
+            pthread_detach(thread);
+            hdr_thread_started = true;
+        } else {
+            ERR("Unable to start HDR worker thread");
+            hdr_pending = false;
+        }
+    }
+
+    pthread_cond_signal(&hdr_cond);
+    pthread_mutex_unlock(&hdr_lock);
+}
+
 void* connection_loop(void* data)
 {
     service_t* service = (service_t*)data;
@@ -488,11 +547,7 @@ static bool videooutput_callback(LSHandle* sh __attribute__((unused)), LSMessage
     const char* hdr_type_str = hdr_type_buf.m_str;
     INFO("videooutput_callback: hdrType: %s", hdr_type_str);
 
-    DynamicRange range = get_dynamic_range(hdr_type_str);
-    int ret = set_hdr_state(service->settings->unix_socket ? "127.0.0.1" : service->settings->address, RPC_PORT, range);
-    if (ret != 0) {
-        ERR("videooutput_callback: set_hdr_state failed, ret: %d", ret);
-    }
+    queue_hdr_state(service, get_dynamic_range(hdr_type_str));
 
     jstring_free_buffer(hdr_type_buf);
     j_release(&parsed);
@@ -537,11 +592,7 @@ static bool picture_callback(LSHandle* sh __attribute__((unused)), LSMessage* ms
     const char* dynamic_range_str = dynamic_range_buf.m_str;
     INFO("picture_callback: dynamicRange: %s", dynamic_range_str);
 
-    DynamicRange range = get_dynamic_range(dynamic_range_str);
-    int ret = set_hdr_state(service->settings->unix_socket ? "127.0.0.1" : service->settings->address, RPC_PORT, range);
-    if (ret != 0) {
-        ERR("videooutput_callback: set_hdr_state failed, ret: %d", ret);
-    }
+    queue_hdr_state(service, get_dynamic_range(dynamic_range_str));
 
     jstring_free_buffer(dynamic_range_buf);
     j_release(&parsed);
