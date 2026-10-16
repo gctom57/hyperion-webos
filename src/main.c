@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <getopt.h>
+#include <glib-unix.h>
 #include <glib.h>
 #include <signal.h>
 #include <stdio.h>
@@ -18,10 +19,12 @@ service_t service;
 bool using_cli = false;
 int print_version = 0;
 
-static void int_handler(int signum __attribute__((unused)))
+// Runs from the main loop (g_unix_signal_add), not in signal context
+static gboolean quit_handler(gpointer user_data)
 {
-    INFO("SIGINT detected, stopping...");
+    INFO("%s detected, stopping...", (const char*)user_data);
     g_main_loop_quit(loop);
+    return G_SOURCE_REMOVE;
 }
 
 static const struct option long_options[] = {
@@ -193,11 +196,21 @@ int main(int argc, char* argv[])
         return 0;
     }
 
-    if (signal(SIGINT, int_handler) == SIG_ERR) {
-        WARN("Setting SIGINT handler failed: %s", strerror(errno));
+    if (!settings_valid(&settings)) {
+        ERR("Invalid settings, refusing to start");
+        return 1;
+    }
+
+    // Socket errors are handled where they happen; never die from SIGPIPE
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
+        WARN("Ignoring SIGPIPE failed: %s", strerror(errno));
     }
 
     loop = g_main_loop_new(NULL, false);
+
+    // webOS stops services with SIGTERM; both paths shut capture down cleanly
+    g_unix_signal_add(SIGINT, quit_handler, "SIGINT");
+    g_unix_signal_add(SIGTERM, quit_handler, "SIGTERM");
 
     if ((ret = service_init(&service, &settings)) != 0) {
         ERR("Service init failed: %d", ret);
@@ -211,7 +224,13 @@ int main(int argc, char* argv[])
     if (using_cli || settings.autostart) {
         if ((ret = service_start(&service)) != 0) {
             ERR("Service startup failed: %d", ret);
-            g_main_loop_quit(loop);
+            // g_main_loop_quit() before g_main_loop_run() has no effect. As a
+            // service keep running so the app can still reconfigure us.
+            if (using_cli) {
+                service_destroy(&service);
+                g_main_loop_unref(loop);
+                return -1;
+            }
         }
     }
 

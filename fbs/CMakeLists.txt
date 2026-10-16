@@ -21,8 +21,8 @@ ExternalProject_Add(flatcc-native
 
 SET(FLATCC_EXECUTABLE ${FLATCC_EXECUTABLE})
 add_custom_command(
-        OUTPUT hyperion_reply_builder.h hyperion_reply_reader.h flatbuffers_common_builder.h flatbuffers_common_reader.h
-        COMMAND ${FLATCC_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/hyperion_reply.fbs -w --common_reader --common_builder
+        OUTPUT hyperion_reply_builder.h hyperion_reply_reader.h hyperion_reply_verifier.h flatbuffers_common_builder.h flatbuffers_common_reader.h
+        COMMAND ${FLATCC_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/hyperion_reply.fbs -w --verifier --common_reader --common_builder
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/hyperion_reply.fbs
 )
 
@@ -37,6 +37,7 @@ add_custom_target(generate-fbs DEPENDS
         flatbuffers_common_reader.h
         hyperion_reply_builder.h
         hyperion_reply_reader.h
+        hyperion_reply_verifier.h
         hyperion_request_builder.h
         hyperion_request_reader.h)
 add_dependencies(generate-fbs flatcc-native)

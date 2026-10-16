@@ -2,8 +2,12 @@
 #include "log.h"
 #include <arpa/inet.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/un.h>
+#include <unistd.h>
+
+#define SETTINGS_MAX_FILE_SIZE (64 * 1024)
 
 const char* const settings_ui_backends[] = { "libgm", "libhalgal", NULL };
 const char* const settings_video_backends[] = { "libvtcapture", "libdile_vt", NULL };
@@ -38,6 +42,41 @@ bool settings_address_valid(const char* address, bool unix_socket)
     return inet_pton(AF_INET, address, &addr) == 1;
 }
 
+static bool int_in_range(const char* key, int value, int min, int max)
+{
+    if (value < min || value > max) {
+        WARN("Settings: %s out of range (%d..%d)", key, min, max);
+        return false;
+    }
+    return true;
+}
+
+bool settings_valid(settings_t* settings)
+{
+    bool valid = true;
+
+    if (!settings_backend_allowed(settings->video_backend, settings_video_backends)) {
+        WARN("Settings: unknown video backend: %s", settings->video_backend);
+        valid = false;
+    }
+    if (!settings_backend_allowed(settings->ui_backend, settings_ui_backends)) {
+        WARN("Settings: unknown UI backend: %s", settings->ui_backend);
+        valid = false;
+    }
+    if (!settings_address_valid(settings->address, settings->unix_socket)) {
+        WARN("Settings: invalid %s address", settings->unix_socket ? "unix socket" : "IPv4");
+        valid = false;
+    }
+
+    valid = int_in_range("port", settings->port, 1, 65535) && valid;
+    valid = int_in_range("priority", settings->priority, 0, 255) && valid;
+    valid = int_in_range("fps", settings->fps, 0, 240) && valid;
+    valid = int_in_range("width", settings->width, 16, 3840) && valid;
+    valid = int_in_range("height", settings->height, 16, 2160) && valid;
+
+    return valid;
+}
+
 static bool json_string_field(jvalue_ref source, const char* key, raw_buffer* out)
 {
     jvalue_ref value = jobject_get(source, j_cstr_to_buffer(key));
@@ -57,12 +96,12 @@ static bool json_int_in_range(jvalue_ref source, const char* key, int min, int m
     }
 
     int number;
-    if (jnumber_get_i32(value, &number) != CONV_OK || number < min || number > max) {
-        WARN("Settings: %s out of range (%d..%d)", key, min, max);
+    if (jnumber_get_i32(value, &number) != CONV_OK) {
+        WARN("Settings: %s is not an integer", key);
         return false;
     }
 
-    return true;
+    return int_in_range(key, number, min, max);
 }
 
 static bool settings_validate_json(settings_t* settings, jvalue_ref source)
@@ -244,12 +283,25 @@ int settings_load_file(settings_t* settings, char* source)
         return -1;
     }
 
-    fseek(f, 0, SEEK_END);
-    long fsize = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    long fsize = -1;
+    if (fseek(f, 0, SEEK_END) == 0) {
+        fsize = ftell(f);
+    }
+    if (fsize < 0 || fsize > SETTINGS_MAX_FILE_SIZE || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return -3;
+    }
 
     char* json = calloc(fsize + 1, 1);
-    fread(json, fsize, 1, f);
+    if (json == NULL) {
+        fclose(f);
+        return -3;
+    }
+    if (fsize > 0 && fread(json, fsize, 1, f) != 1) {
+        free(json);
+        fclose(f);
+        return -3;
+    }
     fclose(f);
 
     jschema_info_init(&schema, jschema_all(), NULL, NULL);
@@ -279,15 +331,30 @@ int settings_save_file(settings_t* settings, char* target)
         return -2;
     }
 
-    FILE* fd = fopen(target, "wb");
+    // Write to a temporary file and rename it over the target, so a crash or
+    // power loss mid-write never leaves a truncated config behind
+    char tmp_path[FILENAME_MAX];
+    if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", target) >= (int)sizeof(tmp_path)) {
+        j_release(&jobj);
+        return -1;
+    }
+
+    FILE* fd = fopen(tmp_path, "wb");
     if (fd == NULL) {
         j_release(&jobj);
         return -1;
     }
 
-    fputs(jvalue_tostring_simple(jobj), fd);
-    fclose(fd);
-
+    bool ok = fputs(jvalue_tostring_simple(jobj), fd) >= 0;
+    ok = fflush(fd) == 0 && ok;
+    ok = fsync(fileno(fd)) == 0 && ok;
+    ok = fclose(fd) == 0 && ok;
     j_release(&jobj);
+
+    if (!ok || rename(tmp_path, target) != 0) {
+        unlink(tmp_path);
+        return -1;
+    }
+
     return 0;
 }

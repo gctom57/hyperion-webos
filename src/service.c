@@ -9,6 +9,8 @@
 #include <errno.h>
 #include <luna-service2/lunaservice.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -109,7 +111,11 @@ void service_init_backends(service_t* service)
     const char* const video_backends[] = { "libvtcapture_backend.so", "libdile_vt_backend.so", NULL };
     char backend_name[FILENAME_MAX] = { 0 };
 
-    if (!service->ui_backend_initialized) {
+    // unicapture_init() clears these pointers, so re-attach backends that are
+    // still loaded from an earlier init
+    if (service->ui_backend_initialized) {
+        service->unicapture.ui_capture = &service->ui_backend;
+    } else {
         service->unicapture.ui_capture = NULL;
 
         if (settings->no_gui) {
@@ -134,7 +140,9 @@ void service_init_backends(service_t* service)
         }
     }
 
-    if (!service->video_backend_initialized) {
+    if (service->video_backend_initialized) {
+        service->unicapture.video_capture = &service->video_backend;
+    } else {
         service->unicapture.video_capture = NULL;
 
         if (settings->no_video) {
@@ -166,17 +174,25 @@ void service_destroy_backends(service_t* service)
         DBG("Result: %d", service->ui_backend.cleanup(service->ui_backend.state));
         service->ui_backend_initialized = false;
     }
+    free(service->ui_backend.name);
+    service->ui_backend.name = NULL;
+    service->unicapture.ui_capture = NULL;
 
     if (service->video_backend_initialized && service->video_backend.cleanup) {
         DBG("Cleaning up video backend...");
         DBG("Result: %d", service->video_backend.cleanup(service->video_backend.state));
         service->video_backend_initialized = false;
     }
+    free(service->video_backend.name);
+    service->video_backend.name = NULL;
+    service->unicapture.video_capture = NULL;
 }
 
 int service_destroy(service_t* service)
 {
     service_stop(service);
+    // Backends are loaded at init even when capture never started
+    service_destroy_backends(service);
     return 0;
 }
 
@@ -309,10 +325,23 @@ bool service_method_set_settings(LSHandle* sh, LSMessage* msg, void* data)
     jschema_info_init(&schema, jschema_all(), NULL, NULL);
     parsed = jdom_parse(j_cstr_to_buffer(LSMessageGetPayload(msg)), DOMOPT_NOOPT, &schema);
 
-    if (jis_null(parsed)) {
+    if (jis_null(parsed) || !jis_object(parsed)) {
         j_release(&parsed);
-        return false;
+        jvalue_ref jerr = jobject_create();
+        jobject_set(jerr, j_cstr_to_buffer("returnValue"), jboolean_create(false));
+        jobject_set(jerr, j_cstr_to_buffer("errorText"), jstring_create("Invalid settings payload"));
+        LSMessageReply(sh, msg, jvalue_tostring_simple(jerr), &lserror);
+        j_release(&jerr);
+        return true;
     }
+
+    // Stop capture and the connection thread before touching settings: they
+    // read settings->address and friends, which settings_load_json() frees.
+    // Backends are torn down too, so new resolution/backend/quirks apply even
+    // when the service is currently stopped.
+    bool was_running = service->running;
+    service_stop(service);
+    service_destroy_backends(service);
 
     int res = settings_load_json(service->settings, parsed);
     if (res == 0) {
@@ -336,11 +365,9 @@ bool service_method_set_settings(LSHandle* sh, LSMessage* msg, void* data)
         }
     }
 
-    bool destroyed = service_destroy(service) == 0;
-
     service_init(service, service->settings);
 
-    if (destroyed) {
+    if (was_running) {
         service_start(service);
     }
 
