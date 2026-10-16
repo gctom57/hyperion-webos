@@ -157,6 +157,14 @@ int service_init(service_t* service, settings_t* settings)
     service->unicapture.callback_data = (void*)service;
     service->unicapture.dump_frames = settings->dump_frames;
 
+    // Without root the capture libraries can't work, and some crash outright
+    // (libgm in libkadaptor on webOS 4). Stay alive instead so the app can
+    // ask for our status and elevate us; backends load on the first start.
+    if (getuid() != 0) {
+        INFO("Not running as root, skipping capture backend detection");
+        return 0;
+    }
+
     service_init_backends(service);
 
     return 0;
@@ -265,6 +273,11 @@ int service_start(service_t* service)
 {
     if (service->running) {
         return 1;
+    }
+
+    if (getuid() != 0) {
+        ERR("Not running as root, refusing to start capture");
+        return -2;
     }
 
     service_init_backends(service);
