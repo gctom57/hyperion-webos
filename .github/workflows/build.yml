@@ -17,6 +17,8 @@ jobs:
         build-type: [Debug, Release]
 
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
     - uses: actions/checkout@v4
@@ -68,6 +70,8 @@ jobs:
       uses: softprops/action-gh-release@v1
       if: ${{ startsWith(github.ref, 'refs/tags/') && matrix.build-type == 'Release' }}
       with:
+        # Personal fork: never advertise builds as a stable release
+        prerelease: true
         files: |
           ${{github.workspace}}/build/hyperion-webos
           ${{github.workspace}}/build/*.so

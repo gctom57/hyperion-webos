@@ -1,5 +1,9 @@
 # hyperion-webos
 
+> [!WARNING]
+> **This is a personal fork for testing. It is not supported and builds from it may break your setup.**
+> Use the official [webosbrew/hyperion-webos](https://github.com/webosbrew/hyperion-webos), shipped with [PicCap](https://github.com/TBSniller/piccap), instead.
+
 [hyperion.ng](https://github.com/hyperion-project/hyperion.ng) grabber for
 webOS.
 
