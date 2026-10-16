@@ -78,7 +78,7 @@ static long parse_content_length(const char* headers, const char* headers_end)
 }
 
 /*
- * Minimal HTTP/1.0 POST over a plain socket. Deliberately no shell, no curl:
+ * Minimal HTTP/1.1 POST over a plain socket. Deliberately no shell, no curl:
  * host comes from user settings and must be a numeric IPv4 address. Every
  * socket operation is bounded by HTTP_TIMEOUT_SEC so a missing receiver cannot
  * stall the Luna main loop. On success response_body holds the NUL-terminated
@@ -128,8 +128,9 @@ int do_http_post(const char* host, ushort port, const char* path, const char* po
         goto exit;
     }
 
+    // HTTP/1.1 because HyperHDR's web server never answers HTTP/1.0 requests
     int header_len = snprintf(header, sizeof(header),
-        "POST %s HTTP/1.0\r\n"
+        "POST %s HTTP/1.1\r\n"
         "Host: %s:%u\r\n"
         "Content-Type: application/json\r\n"
         "Content-Length: %zu\r\n"
