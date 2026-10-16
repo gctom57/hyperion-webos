@@ -17,6 +17,8 @@
 #include "unicapture.h"
 #include "utils.h"
 
+int capture_release_frame(void* state, frame_info_t* frame);
+
 typedef struct _dile_vt_backend_state {
     DILE_VT_HANDLE vth;
     DILE_OUTPUTDEVICE_STATE output_state;
@@ -26,6 +28,42 @@ typedef struct _dile_vt_backend_state {
     int mem_fd;
     bool no_freeze_to_acquire_frame;
 } dile_vt_backend_state_t;
+
+// Releases everything capture_init() may have set up; safe on partial init
+static void dile_vt_free(dile_vt_backend_state_t* this)
+{
+    if (this->vfbs != NULL) {
+        size_t map_size = (size_t)this->vfbprop.stride * this->vfbprop.height;
+        for (uint32_t vfb = 0; vfb < this->vfbcap.numVfbs; vfb++) {
+            if (this->vfbs[vfb] == NULL)
+                continue;
+            for (uint32_t plane = 0; plane < this->vfbcap.numPlanes; plane++) {
+                if (this->vfbs[vfb][plane] != NULL && this->vfbs[vfb][plane] != MAP_FAILED) {
+                    munmap(this->vfbs[vfb][plane], map_size);
+                }
+            }
+            free(this->vfbs[vfb]);
+        }
+        free(this->vfbs);
+    }
+
+    if (this->vfbprop.ptr != NULL) {
+        for (uint32_t vfb = 0; vfb < this->vfbcap.numVfbs; vfb++) {
+            free(this->vfbprop.ptr[vfb]);
+        }
+        free(this->vfbprop.ptr);
+    }
+
+    if (this->mem_fd >= 0) {
+        close(this->mem_fd);
+    }
+
+    if (this->vth != NULL) {
+        DILE_VT_Destroy(this->vth);
+    }
+
+    free(this);
+}
 
 int capture_init(cap_backend_config_t* config, void** state_p)
 {
@@ -48,8 +86,12 @@ int capture_init(cap_backend_config_t* config, void** state_p)
     }
 
     dile_vt_backend_state_t* this = calloc(1, sizeof(dile_vt_backend_state_t));
-    *state_p = this;
+    if (this == NULL) {
+        DILE_VT_Destroy(vth);
+        return -1;
+    }
     this->vth = vth;
+    this->mem_fd = -1;
 
     DBG("Got DILE_VT context!");
 
@@ -151,11 +193,17 @@ int capture_init(cap_backend_config_t* config, void** state_p)
 
     INFO("[DILE_VT] vfbs: %d; planes: %d", this->vfbcap.numVfbs, this->vfbcap.numPlanes);
     uint32_t** ptr = calloc(this->vfbcap.numVfbs, sizeof(uint32_t*));
-    for (uint32_t vfb = 0; vfb < this->vfbcap.numVfbs; vfb++) {
-        ptr[vfb] = calloc(this->vfbcap.numPlanes, sizeof(uint32_t));
+    if (ptr == NULL) {
+        ret = -12;
+        goto err_destroy;
     }
-
     this->vfbprop.ptr = ptr;
+    for (uint32_t vfb = 0; vfb < this->vfbcap.numVfbs; vfb++) {
+        if ((ptr[vfb] = calloc(this->vfbcap.numPlanes, sizeof(uint32_t))) == NULL) {
+            ret = -12;
+            goto err_destroy;
+        }
+    }
 
     if (DILE_VT_GetAllVideoFrameBufferProperty(vth, &this->vfbcap, &this->vfbprop) != 0) {
         ERR("[DILE_VT] GetAllVideoFrameBufferProperty failed!");
@@ -164,7 +212,8 @@ int capture_init(cap_backend_config_t* config, void** state_p)
     }
 
     // TODO: check out if /dev/gfx is something we should rather use
-    this->mem_fd = open("/dev/mem", O_RDWR | O_SYNC);
+    // Frames are only read, so don't ask for write access to physical memory
+    this->mem_fd = open("/dev/mem", O_RDONLY | O_SYNC);
     if (this->mem_fd == -1) {
         ERR("[DILE_VT] Creating handle to /dev/mem failed!");
         ret = -6;
@@ -172,16 +221,22 @@ int capture_init(cap_backend_config_t* config, void** state_p)
     }
 
     INFO("[DILE_VT] pixelFormat: %d; width: %d; height: %d; stride: %d...", this->vfbprop.pixelFormat, this->vfbprop.width, this->vfbprop.height, this->vfbprop.stride);
-    this->vfbs = calloc(this->vfbcap.numVfbs, sizeof(uint8_t**));
+    if ((this->vfbs = calloc(this->vfbcap.numVfbs, sizeof(uint8_t**))) == NULL) {
+        ret = -12;
+        goto err_destroy;
+    }
     for (uint32_t vfb = 0; vfb < this->vfbcap.numVfbs; vfb++) {
-        this->vfbs[vfb] = calloc(this->vfbcap.numPlanes, sizeof(uint8_t*));
+        if ((this->vfbs[vfb] = calloc(this->vfbcap.numPlanes, sizeof(uint8_t*))) == NULL) {
+            ret = -12;
+            goto err_destroy;
+        }
         for (uint32_t plane = 0; plane < this->vfbcap.numPlanes; plane++) {
             DBG("[DILE_VT] vfb[%d][%d] = 0x%08x", vfb, plane, this->vfbprop.ptr[vfb][plane]);
             this->vfbs[vfb][plane] = (uint8_t*)mmap(0, this->vfbprop.stride * this->vfbprop.height, PROT_READ, MAP_SHARED, this->mem_fd, this->vfbprop.ptr[vfb][plane]);
             if (this->vfbs[vfb][plane] == MAP_FAILED) {
                 ERR("[DILE_VT] mmap for vfb[%d][%d] failed!", vfb, plane);
                 ret = -7;
-                goto err_mmap;
+                goto err_destroy;
             }
         }
     }
@@ -191,23 +246,17 @@ int capture_init(cap_backend_config_t* config, void** state_p)
         this->no_freeze_to_acquire_frame = true;
     }
 
+    *state_p = this;
     return 0;
 
-err_mmap:
-    // TODO: do we need to unmap mmaped memory here as well?
-    close(this->mem_fd);
-
 err_destroy:
-    DILE_VT_Destroy(vth);
-    free(this);
+    dile_vt_free(this);
     return ret;
 }
 
 int capture_cleanup(void* state)
 {
-    dile_vt_backend_state_t* this = (dile_vt_backend_state_t*)state;
-    DILE_VT_Destroy(this->vth);
-    free(this);
+    dile_vt_free((dile_vt_backend_state_t*)state);
     return 0;
 }
 
@@ -239,6 +288,11 @@ int capture_acquire_frame(void* state, frame_info_t* frame)
     }
 
     DILE_VT_GetCurrentVideoFrameBufferProperty(this->vth, NULL, &idx);
+    if (idx >= this->vfbcap.numVfbs) {
+        ERR("[DILE_VT] Invalid framebuffer index: %u", idx);
+        capture_release_frame(state, frame);
+        return -1;
+    }
 
     frame->width = this->vfbprop.width;
     frame->height = this->vfbprop.height;
@@ -263,6 +317,7 @@ int capture_acquire_frame(void* state, frame_info_t* frame)
         frame->planes[1].stride = this->vfbprop.stride;
     } else {
         ERR("[DILE_VT] Unhandled pixelformat: 0x%x!", this->vfbprop.pixelFormat);
+        capture_release_frame(state, frame);
         return -1;
     }
 

@@ -106,11 +106,12 @@ void* unicapture_vsync_handler(void* data)
     INFO("vsync thread starting...");
 
     while (this->vsync_thread_running) {
-        if (this->vsync && this->video_capture_running && this->video_capture->wait) {
-            if ((this->video_capture->wait(this->video_capture->state)) == -99) { // stop video capture (will be started again in unicapture_run())
-                INFO("Stopping video capture.");
-                this->video_capture->terminate(this->video_capture->state);
-                this->video_capture_running = false;
+        if (this->vsync && this->video_capture_running && !__atomic_load_n(&this->video_restart_requested, __ATOMIC_ACQUIRE) && this->video_capture->wait) {
+            if ((this->video_capture->wait(this->video_capture->state)) == -99) {
+                // Only flag it: the capture thread may be inside acquire_frame()
+                // right now, so it terminates (and later restarts) the backend
+                INFO("Video capture requested a restart.");
+                __atomic_store_n(&this->video_restart_requested, true, __ATOMIC_RELEASE);
             }
         } else {
             usleep(1000000 / (this->fps == 0 ? 30 : this->fps));
@@ -149,13 +150,19 @@ void* unicapture_run(void* data)
     pthread_cond_init(&this->vsync_cond, NULL);
 
     frame_info_t blended_frame = { PIXFMT_INVALID };
-    frame_info_t final_frame = { PIXFMT_INVALID };
     size_t blended_frame_capacities[MAX_PLANES] = { 0 };
     uint8_t* blend_alpha_y = NULL;
     size_t blend_alpha_y_capacity = 0;
+    uint8_t* ui_scaled = NULL;
+    size_t ui_scaled_capacity = 0;
 
+    __atomic_store_n(&this->video_restart_requested, false, __ATOMIC_RELEASE);
     this->vsync_thread_running = true;
-    pthread_create(&this->vsync_thread, NULL, unicapture_vsync_handler, this);
+    if (pthread_create(&this->vsync_thread, NULL, unicapture_vsync_handler, this) != 0) {
+        ERR("Unable to start vsync thread");
+        this->vsync_thread_running = false;
+        this->running = false;
+    }
 
     while (this->running) {
         uint64_t now = getticks_us();
@@ -190,6 +197,8 @@ void* unicapture_run(void* data)
         frame_info_t ui_frame_converted = { PIXFMT_INVALID };
         frame_info_t video_frame = { PIXFMT_INVALID };
         frame_info_t video_frame_converted = { PIXFMT_INVALID };
+        frame_info_t final_frame = { PIXFMT_INVALID };
+        bool video_restart = __atomic_load_n(&this->video_restart_requested, __ATOMIC_ACQUIRE);
 
         // Capture frames
         if (this->ui_capture_running) {
@@ -198,7 +207,7 @@ void* unicapture_run(void* data)
             }
         }
 
-        if (this->video_capture_running) {
+        if (this->video_capture_running && !video_restart) {
             if ((ret = video_capture->acquire_frame(video_capture->state, &video_frame)) != 0) {
                 DBG("video_capture acquire_frame failed: %d", ret);
                 video_frame.pixel_format = PIXFMT_INVALID;
@@ -209,26 +218,56 @@ void* unicapture_run(void* data)
         pixel_format_t target_format = this->target_format;
         pixel_format_t blend_format = (target_format == PIXFMT_RGB || target_format == PIXFMT_ARGB) ? PIXFMT_ARGB : PIXFMT_YUV420_SEMI_PLANAR;
 
-        // Convert frame to suitable video formats
-        if (ui_frame.pixel_format != PIXFMT_INVALID) {
-            if (ui_frame.pixel_format == blend_format) {
-                borrow_frame(&ui_frame_converted, &ui_frame);
+        // Blending reads both frames with the video frame's geometry, so bring
+        // the UI layer to the same size first (ui_frame itself stays untouched
+        // because it has to be handed back to release_frame)
+        frame_info_t ui_source = ui_frame;
+        if (ui_frame.pixel_format != PIXFMT_INVALID && video_frame.pixel_format != PIXFMT_INVALID
+            && (ui_frame.width != video_frame.width || ui_frame.height != video_frame.height)) {
+            const int width = video_frame.width;
+            const int height = video_frame.height;
+
+            if ((ui_frame.pixel_format == PIXFMT_ARGB || ui_frame.pixel_format == PIXFMT_ABGR)
+                && width > 0 && height > 0
+                && reserve_buffer(&ui_scaled, &ui_scaled_capacity, (size_t)width * height * 4) == 0) {
+                ARGBScale(ui_frame.planes[0].buffer, ui_frame.planes[0].stride, ui_frame.width, ui_frame.height,
+                    ui_scaled, width * 4, width, height, kFilterBilinear);
+                ui_source.width = width;
+                ui_source.height = height;
+                ui_source.planes[0].buffer = ui_scaled;
+                ui_source.planes[0].stride = width * 4;
             } else {
-                converter_run(&ui_converter, &ui_frame, &ui_frame_converted, blend_format);
+                DBG("UI frame %dx%d can't be matched to video %dx%d, sending video only",
+                    ui_frame.width, ui_frame.height, width, height);
+                ui_source.pixel_format = PIXFMT_INVALID;
+            }
+        }
+
+        // Convert frame to suitable video formats
+        if (ui_source.pixel_format != PIXFMT_INVALID) {
+            if (ui_source.pixel_format == blend_format) {
+                borrow_frame(&ui_frame_converted, &ui_source);
+            } else if (converter_run(&ui_converter, &ui_source, &ui_frame_converted, blend_format) != 0) {
+                ui_frame_converted.pixel_format = PIXFMT_INVALID;
             }
         }
 
         if (video_frame.pixel_format != PIXFMT_INVALID) {
             if (video_frame.pixel_format == blend_format) {
                 borrow_frame(&video_frame_converted, &video_frame);
-            } else {
-                converter_run(&video_converter, &video_frame, &video_frame_converted, blend_format);
+            } else if (converter_run(&video_converter, &video_frame, &video_frame_converted, blend_format) != 0) {
+                video_frame_converted.pixel_format = PIXFMT_INVALID;
             }
         }
 
         uint64_t frame_converted = getticks_us();
 
         bool got_frame = true;
+
+        if (video_frame_converted.pixel_format != PIXFMT_INVALID && ui_frame_converted.pixel_format != PIXFMT_INVALID
+            && (video_frame_converted.width != ui_frame_converted.width || video_frame_converted.height != ui_frame_converted.height)) {
+            ui_frame_converted.pixel_format = PIXFMT_INVALID;
+        }
 
         // Blend frames and prepare for sending
         if (video_frame_converted.pixel_format != PIXFMT_INVALID && ui_frame_converted.pixel_format != PIXFMT_INVALID) {
@@ -271,8 +310,8 @@ void* unicapture_run(void* data)
                     blended_frame.width = width;
                     blended_frame.pixel_format = PIXFMT_YUV420_SEMI_PLANAR;
 
-                    ARGBExtractAlpha(ui_frame.planes[0].buffer,
-                        ui_frame.planes[0].stride,
+                    ARGBExtractAlpha(ui_source.planes[0].buffer,
+                        ui_source.planes[0].stride,
                         blend_alpha_y,
                         width,
                         width,
@@ -304,25 +343,30 @@ void* unicapture_run(void* data)
             if (got_frame) {
                 if (blended_frame.pixel_format == target_format) {
                     final_frame = blended_frame;
-                } else {
-                    converter_run(&final_converter, &blended_frame, &final_frame, target_format);
+                } else if (converter_run(&final_converter, &blended_frame, &final_frame, target_format) != 0) {
+                    final_frame.pixel_format = PIXFMT_INVALID;
                 }
             }
         } else if (ui_frame_converted.pixel_format != PIXFMT_INVALID) {
             if (ui_frame_converted.pixel_format == target_format) {
                 borrow_frame(&final_frame, &ui_frame_converted);
-            } else {
-                converter_run(&final_converter, &ui_frame_converted, &final_frame, target_format);
+            } else if (converter_run(&final_converter, &ui_frame_converted, &final_frame, target_format) != 0) {
+                final_frame.pixel_format = PIXFMT_INVALID;
             }
         } else if (video_frame_converted.pixel_format != PIXFMT_INVALID) {
             if (video_frame_converted.pixel_format == target_format) {
                 borrow_frame(&final_frame, &video_frame_converted);
-            } else {
-                converter_run(&final_converter, &video_frame_converted, &final_frame, target_format);
+            } else if (converter_run(&final_converter, &video_frame_converted, &final_frame, target_format) != 0) {
+                final_frame.pixel_format = PIXFMT_INVALID;
             }
         } else {
-            got_frame = false;
             WARN("No valid frame to send...");
+        }
+
+        // Never send a frame that wasn't produced in this iteration: earlier
+        // buffers may already have been handed back to the backend
+        if (final_frame.pixel_format != target_format) {
+            got_frame = false;
         }
 
         uint64_t frame_processed = getticks_us();
@@ -331,23 +375,27 @@ void* unicapture_run(void* data)
             char filename[256];
             snprintf(filename, sizeof(filename), "/tmp/hyperion-webos-dump.%03d.data", (int)(framecounter / 30) % 10);
             FILE* fd = fopen(filename, "wb");
-            if (target_format == PIXFMT_RGB)
-                fwrite(final_frame.planes[0].buffer, 3 * final_frame.width * final_frame.height, 1, fd);
-            if (target_format == PIXFMT_ARGB)
-                fwrite(final_frame.planes[0].buffer, 4 * final_frame.width * final_frame.height, 1, fd);
-            if (target_format == PIXFMT_YUV420_SEMI_PLANAR) {
-                fwrite(final_frame.planes[0].buffer, final_frame.width * final_frame.height, 1, fd);
-                fwrite(final_frame.planes[1].buffer, final_frame.width * final_frame.height / 2, 1, fd);
+            if (fd == NULL) {
+                WARN("Unable to open %s for frame dump", filename);
+            } else {
+                if (target_format == PIXFMT_RGB)
+                    fwrite(final_frame.planes[0].buffer, 3 * final_frame.width * final_frame.height, 1, fd);
+                if (target_format == PIXFMT_ARGB)
+                    fwrite(final_frame.planes[0].buffer, 4 * final_frame.width * final_frame.height, 1, fd);
+                if (target_format == PIXFMT_YUV420_SEMI_PLANAR) {
+                    fwrite(final_frame.planes[0].buffer, final_frame.width * final_frame.height, 1, fd);
+                    fwrite(final_frame.planes[1].buffer, final_frame.width * final_frame.height / 2, 1, fd);
+                }
+                fclose(fd);
+                INFO("Buffer dumped to: %s", filename);
             }
-            fclose(fd);
-            INFO("Buffer dumped to: %s", filename);
         }
 
-        if (this->callback != NULL && (target_format == PIXFMT_RGB || target_format == PIXFMT_ARGB)) {
+        if (got_frame && this->callback != NULL && (target_format == PIXFMT_RGB || target_format == PIXFMT_ARGB)) {
             this->callback(this->callback_data, final_frame.width, final_frame.height, final_frame.planes[0].buffer);
         }
 
-        if (this->callback_nv12 != NULL && target_format == PIXFMT_YUV420_SEMI_PLANAR) {
+        if (got_frame && this->callback_nv12 != NULL && target_format == PIXFMT_YUV420_SEMI_PLANAR) {
             this->callback_nv12(this->callback_data, final_frame.width, final_frame.height, final_frame.planes[0].buffer,
                 final_frame.planes[1].buffer, final_frame.planes[0].stride, final_frame.planes[1].stride);
         }
@@ -360,6 +408,16 @@ void* unicapture_run(void* data)
 
         if (video_frame.pixel_format != PIXFMT_INVALID) {
             video_capture->release_frame(video_capture->state, &video_frame);
+        }
+
+        if (video_restart) {
+            if (this->video_capture_running) {
+                INFO("Stopping video capture.");
+                video_capture->terminate(video_capture->state);
+                this->video_capture_running = false;
+            }
+            // Started again at the top of the loop
+            __atomic_store_n(&this->video_restart_requested, false, __ATOMIC_RELEASE);
         }
 
         uint64_t frame_released = getticks_us();
@@ -411,6 +469,10 @@ void* unicapture_run(void* data)
         }
     }
     free(blend_alpha_y);
+    free(ui_scaled);
+
+    pthread_cond_destroy(&this->vsync_cond);
+    pthread_mutex_destroy(&this->vsync_lock);
 
     converter_release(&ui_converter);
     converter_release(&video_converter);
@@ -433,7 +495,11 @@ int unicapture_start(unicapture_state_t* this)
     }
 
     this->running = true;
-    pthread_create(&this->main_thread, NULL, unicapture_run, this);
+    if (pthread_create(&this->main_thread, NULL, unicapture_run, this) != 0) {
+        ERR("Unable to start capture thread");
+        this->running = false;
+        return -1;
+    }
 
     return 0;
 }

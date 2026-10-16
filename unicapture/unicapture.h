@@ -91,6 +91,8 @@ typedef struct _unicapture_state {
 
     bool ui_capture_running;
     bool video_capture_running;
+    // Set by the vsync thread when the video backend asks to be restarted
+    bool video_restart_requested;
 
     bool vsync_thread_running;
     pthread_t vsync_thread;

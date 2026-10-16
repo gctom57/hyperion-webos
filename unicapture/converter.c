@@ -227,6 +227,7 @@ int converter_run(converter_t* this, frame_info_t* input, frame_info_t* output, 
         output->planes[1].buffer = this->buffers[3];
         output->planes[1].stride = input->width;
         output->pixel_format = PIXFMT_YUV420_SEMI_PLANAR;
+        return 0;
     }
 
     return -1;

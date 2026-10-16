@@ -48,6 +48,9 @@ int capture_init(cap_backend_config_t* config, void** state_p)
     INFO("Starting vtcapture initialization.");
 
     vtcapture_backend_state_t* self = (vtcapture_backend_state_t*)calloc(1, sizeof(vtcapture_backend_state_t));
+    if (self == NULL) {
+        return -1;
+    }
 
     try {
         if (!(self->driver = vtCapture_create())) {
@@ -56,6 +59,9 @@ int capture_init(cap_backend_config_t* config, void** state_p)
             goto err_destroy;
         }
     } catch (const std::runtime_error& err) {
+        // self is freed below, so this must not look like success
+        ERR("vtCapture_create threw: %s", err.what());
+        ret = -1;
         goto err_destroy;
     }
 

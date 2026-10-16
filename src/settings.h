@@ -41,6 +41,8 @@ void settings_init(settings_t*);
 
 bool settings_backend_allowed(const char* name, const char* const* allowed);
 bool settings_address_valid(const char* address, bool unix_socket);
+// Range/allowlist check of the in-memory settings (CLI arguments bypass the JSON validation)
+bool settings_valid(settings_t* settings);
 
 int settings_load_json(settings_t* settings, jvalue_ref source);
 int settings_save_json(settings_t* settings, jvalue_ref target);
