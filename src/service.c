@@ -311,9 +311,16 @@ int service_stop(service_t* service)
     pthread_join(service->connection_thread, NULL);
     service->running = false;
 
-    service_destroy_backends(service);
+    // Backends stay loaded: on some TVs (seen on webOS 4) DILE_VT can't be
+    // created again after DILE_VT_Destroy, so stop/start and power pauses
+    // reuse the open handle. service_destroy() releases them on exit.
 
     return 0;
+}
+
+static bool same_string(const char* a, const char* b)
+{
+    return strcmp(a ? a : "", b ? b : "") == 0;
 }
 
 bool service_method_start(LSHandle* sh, LSMessage* msg, void* data)
@@ -415,13 +422,28 @@ bool service_method_set_settings(LSHandle* sh, LSMessage* msg, void* data)
 
     // Stop capture and the connection thread before touching settings: they
     // read settings->address and friends, which settings_load_json() frees.
-    // Backends are torn down too, so new resolution/backend/quirks apply even
-    // when the service is currently stopped.
     bool was_running = service->running;
     service_stop(service);
-    service_destroy_backends(service);
+
+    // Remember what the backends were set up with: they are only reloaded
+    // when one of these changes (reloading DILE_VT breaks it on some TVs)
+    settings_t* s = service->settings;
+    char* old_video_backend = s->video_backend ? strdup(s->video_backend) : NULL;
+    char* old_ui_backend = s->ui_backend ? strdup(s->ui_backend) : NULL;
+    const int old_width = s->width, old_height = s->height, old_fps = s->fps, old_quirks = s->quirks;
+    const bool old_no_video = s->no_video, old_no_gui = s->no_gui;
 
     int res = settings_load_json(service->settings, parsed);
+
+    if (res == 0
+        && (s->width != old_width || s->height != old_height || s->fps != old_fps || s->quirks != old_quirks
+            || s->no_video != old_no_video || s->no_gui != old_no_gui
+            || !same_string(s->video_backend, old_video_backend) || !same_string(s->ui_backend, old_ui_backend))) {
+        INFO("Capture settings changed, reloading backends");
+        service_destroy_backends(service);
+    }
+    free(old_video_backend);
+    free(old_ui_backend);
     if (res == 0) {
         if (settings_save_file(service->settings, SETTINGS_PERSISTENCE_PATH) != 0) {
             WARN("Settings save failed");
