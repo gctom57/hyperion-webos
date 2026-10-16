@@ -114,6 +114,9 @@ void service_init_backends(service_t* service)
 
         if (settings->no_gui) {
             INFO("UI capture disabled");
+        } else if (!settings_backend_allowed(settings->ui_backend, settings_ui_backends)) {
+            // The name ends up in dlopen(), so never pass through anything unknown
+            ERR("Refusing unknown UI backend: %s", settings->ui_backend);
         } else {
             if (settings->ui_backend == NULL || settings->ui_backend[0] == '\0' || strcmp(settings->ui_backend, "auto") == 0) {
                 INFO("Autodetecting UI backend...");
@@ -136,6 +139,8 @@ void service_init_backends(service_t* service)
 
         if (settings->no_video) {
             INFO("Video capture disabled");
+        } else if (!settings_backend_allowed(settings->video_backend, settings_video_backends)) {
+            ERR("Refusing unknown video backend: %s", settings->video_backend);
         } else {
             if (settings->video_backend == NULL || settings->video_backend[0] == '\0' || strcmp(settings->video_backend, "auto") == 0) {
                 INFO("Autodetecting video backend...");
