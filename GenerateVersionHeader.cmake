@@ -1,8 +1,11 @@
 if(GIT_EXECUTABLE)
   get_filename_component(SRC_DIR ${SRC} DIRECTORY)
-  # Generate a git-describe version string from Git repository tags
+  # Generate a git-describe version string from Git repository tags, e.g.
+  # 0.2.1-70-g668bf52. --all would name the nearest ref instead, which on CI
+  # branch builds gave "remotes/origin/<branch>-0-g<hash>". --always falls
+  # back to the commit hash when no tag is reachable (shallow checkouts).
   execute_process(
-    COMMAND ${GIT_EXECUTABLE} describe --all --long --dirty
+    COMMAND ${GIT_EXECUTABLE} describe --tags --long --dirty --always
     WORKING_DIRECTORY ${SRC_DIR}
     OUTPUT_VARIABLE GIT_DESCRIBE_VERSION
     RESULT_VARIABLE GIT_DESCRIBE_ERROR_CODE
