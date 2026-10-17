@@ -296,7 +296,8 @@ static const char* service_video_error_text(service_t* service)
     case -EBUSY:
         return "Held by another process";
     case -EIO:
-        return "Capture driver refused, a TV reboot may help";
+        // Busy (another app) or stuck (needs a reboot) look the same from here
+        return "Capture driver busy or refused, retrying";
     default:
         return "No video backend could be opened";
     }
