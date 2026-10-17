@@ -386,9 +386,54 @@ static bool same_string(const char* a, const char* b)
     return strcmp(a ? a : "", b ? b : "") == 0;
 }
 
+/*
+ * start/stop/setSettings change what the TV does, and the service's role
+ * accepts calls from everyone ("inbound": ["*"] after elevation). Only let
+ * the PicCap app and command-line callers through:
+ * - The PicCap app: its application ID, which the app manager sets for web
+ *   apps, so another installed app can't claim it.
+ * - Callers without any identity: luna-send from a shell, as used by the
+ *   autostart script, Homebrew Channel exec and tools like Glasshouse. That
+ *   already needs root, and root can do anything anyway (luna-send -a can
+ *   claim any app ID), so this is no protection against root.
+ * Anything else, e.g. another installed app, is refused. status and
+ * getSettings stay open.
+ */
+#define PICCAP_APP_ID "org.webosbrew.piccap"
+
+static bool service_caller_allowed(LSHandle* sh, LSMessage* msg)
+{
+    const char* app_id = LSMessageGetApplicationID(msg);
+    const char* service_name = LSMessageGetSenderServiceName(msg);
+
+    if (app_id != NULL && strcmp(app_id, PICCAP_APP_ID) == 0) {
+        return true;
+    }
+    if (app_id == NULL && service_name == NULL) {
+        return true;
+    }
+
+    WARN("Refusing %s from app %s / service %s", LSMessageGetMethod(msg),
+        app_id ? app_id : "(none)", service_name ? service_name : "(none)");
+
+    LSError lserror;
+    LSErrorInit(&lserror);
+    jvalue_ref jobj = jobject_create();
+    jobject_set(jobj, j_cstr_to_buffer("returnValue"), jboolean_create(false));
+    jobject_set(jobj, j_cstr_to_buffer("errorText"), jstring_create("Not allowed for this caller"));
+    LSMessageReply(sh, msg, jvalue_tostring_simple(jobj), &lserror);
+    j_release(&jobj);
+    LSErrorFree(&lserror);
+    return false;
+}
+
 bool service_method_start(LSHandle* sh, LSMessage* msg, void* data)
 {
     service_t* service = (service_t*)data;
+    if (!service_caller_allowed(sh, msg)) {
+        return true;
+    }
+
     LSError lserror;
     LSErrorInit(&lserror);
 
@@ -399,12 +444,17 @@ bool service_method_start(LSHandle* sh, LSMessage* msg, void* data)
     LSMessageReply(sh, msg, jvalue_tostring_simple(jobj), &lserror);
 
     j_release(&jobj);
-    return false;
+    // true = handled; false made luna-service2 log "Method wasn't handled"
+    return true;
 }
 
 bool service_method_stop(LSHandle* sh, LSMessage* msg, void* data)
 {
     service_t* service = (service_t*)data;
+    if (!service_caller_allowed(sh, msg)) {
+        return true;
+    }
+
     LSError lserror;
     LSErrorInit(&lserror);
 
@@ -415,7 +465,8 @@ bool service_method_stop(LSHandle* sh, LSMessage* msg, void* data)
     LSMessageReply(sh, msg, jvalue_tostring_simple(jobj), &lserror);
 
     j_release(&jobj);
-    return false;
+    // true = handled; false made luna-service2 log "Method wasn't handled"
+    return true;
 }
 
 bool service_method_status(LSHandle* sh, LSMessage* msg, void* data)
@@ -466,6 +517,9 @@ bool service_method_get_settings(LSHandle* sh, LSMessage* msg, void* data)
 bool service_method_set_settings(LSHandle* sh, LSMessage* msg, void* data)
 {
     service_t* service = (service_t*)data;
+    if (!service_caller_allowed(sh, msg)) {
+        return true;
+    }
     LSError lserror;
     LSErrorInit(&lserror);
 
