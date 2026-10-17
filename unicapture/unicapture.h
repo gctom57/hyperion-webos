@@ -118,6 +118,8 @@ int unicapture_try_backends(cap_backend_config_t* config, capture_backend_t* bac
 int unicapture_init_backend(cap_backend_config_t* config, capture_backend_t* backend, const char* name);
 int unicapture_start(unicapture_state_t* state);
 int unicapture_stop(unicapture_state_t* state);
+// Last resort for a dying process: stops running backends without joining threads
+void unicapture_emergency_stop(unicapture_state_t* state);
 #ifdef __cplusplus
 }
 #endif

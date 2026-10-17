@@ -19,7 +19,7 @@ add_library(dile_vt_backend SHARED
         backends/libdile_vt.c
 )
 target_include_directories(dile_vt_backend PRIVATE ${UNICAPTURE_INCLUDE_DIRS} backends)
-target_link_libraries(dile_vt_backend dile_vt)
+target_link_libraries(dile_vt_backend dile_vt ${CMAKE_DL_LIBS})
 
 # libdile_vt.so seems to be missing DT_NEEDED for libPmLogLib.so.3 - let's just
 # add it over to our library. For some reason adding PmLogLib loaded via

@@ -4,8 +4,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <dlfcn.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <signal.h>
+#include <stdint.h>
 #include <sys/mman.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -28,6 +32,96 @@ typedef struct _dile_vt_backend_state {
     int mem_fd;
     bool no_freeze_to_acquire_frame;
 } dile_vt_backend_state_t;
+
+/*
+ * DILE_VT_Create (HAL_VT_Init) registers the VT capture unit with the kernel
+ * display driver under the caller's pid; only DILE_VT_Destroy (HAL_VT_Finalize)
+ * unregisters it, again by pid. A process that dies in between leaves the unit
+ * registered to a dead pid and every later DILE_VT_Create fails until reboot
+ * (seen on webOS 3.5). A DILE_VT_Create that fails part way leaves its own
+ * registration behind too. So remember who owns it, and if the recorded owner
+ * is gone, unregister on its behalf the way HAL_VT_Finalize does. The file
+ * lives in /tmp, which a reboot clears along with the driver.
+ */
+#define DILE_VT_OWNER_FILE "/tmp/piccap-dilevt.pid"
+
+// In every libdile_vt we know of, but not in the tv-native-apis header
+int DILE_VT_Finalize(void) __attribute__((weak));
+
+typedef enum {
+    OWNER_NONE, // nothing recorded, or released now
+    OWNER_ALIVE, // another running process holds VT capture
+} owner_state_t;
+
+static void owner_record(void)
+{
+    FILE* f = fopen(DILE_VT_OWNER_FILE, "w");
+    if (f == NULL) {
+        WARN("[DILE_VT] Unable to record capture owner: %s", strerror(errno));
+        return;
+    }
+    fprintf(f, "%d\n", (int)getpid());
+    fclose(f);
+}
+
+static void owner_clear(void)
+{
+    unlink(DILE_VT_OWNER_FILE);
+}
+
+static owner_state_t release_stale_owner(void)
+{
+    int pid = 0;
+    FILE* f = fopen(DILE_VT_OWNER_FILE, "r");
+    if (f == NULL) {
+        return OWNER_NONE;
+    }
+    if (fscanf(f, "%d", &pid) != 1) {
+        pid = 0;
+    }
+    fclose(f);
+
+    if (pid <= 0 || pid == (int)getpid()) {
+        return OWNER_NONE;
+    }
+    if (kill(pid, 0) == 0 || errno != ESRCH) {
+        WARN("[DILE_VT] VT capture is held by running process %d", pid);
+        return OWNER_ALIVE;
+    }
+
+    // libhal_vt already pulled libkadaptor in; look it up instead of linking it
+    void* kadp = dlopen("libkadaptor.so.2", RTLD_NOW | RTLD_LOCAL);
+    if (kadp == NULL) {
+        WARN("[DILE_VT] Unable to load libkadaptor: %s", dlerror());
+        return OWNER_NONE;
+    }
+
+    int (*de_open)(void) = NULL;
+    int (*de_close)(void) = NULL;
+    int (*de_set_vtm)(void*) = NULL;
+    *(void**)(&de_open) = dlsym(kadp, "KADP_DE_Open");
+    *(void**)(&de_close) = dlsym(kadp, "KADP_DE_Close");
+    *(void**)(&de_set_vtm) = dlsym(kadp, "KADP_DE_SetVTM");
+    int ret = -1;
+
+    if (de_open != NULL && de_close != NULL && de_set_vtm != NULL && de_open() == 0) {
+        // Same request HAL_VT_Finalize sends: 0x70 bytes, pid at 4, enable = 0 at 8
+        uint32_t vtm[0x70 / sizeof(uint32_t)] = { 0 };
+        vtm[1] = (uint32_t)pid;
+        ret = de_set_vtm(vtm);
+        de_close();
+    }
+    dlclose(kadp);
+
+    if (ret != 0) {
+        WARN("[DILE_VT] Releasing VT capture left by dead process %d failed: %d", pid, ret);
+        return OWNER_NONE;
+    }
+
+    INFO("[DILE_VT] Released VT capture left registered by dead process %d", pid);
+    owner_clear();
+    return OWNER_NONE;
+}
 
 // Releases everything capture_init() may have set up; safe on partial init
 static void dile_vt_free(dile_vt_backend_state_t* this)
@@ -60,18 +154,14 @@ static void dile_vt_free(dile_vt_backend_state_t* this)
 
     if (this->vth != NULL) {
         DILE_VT_Destroy(this->vth);
+        owner_clear();
     }
 
     free(this);
 }
 
-int capture_init(cap_backend_config_t* config, void** state_p)
+static DILE_VT_HANDLE create_handle(cap_backend_config_t* config)
 {
-    int ret = 0;
-    DILE_VT_HANDLE vth = NULL;
-
-    INFO("Capture start called.");
-
     // DILE_VT_CreateEx is a weak symbol that older libdile_vt builds lack;
     // calling it there would jump to NULL
     if (HAS_QUIRK(config->quirks, QUIRK_DILE_VT_CREATE_EX) && DILE_VT_CreateEx == NULL) {
@@ -80,20 +170,44 @@ int capture_init(cap_backend_config_t* config, void** state_p)
 
     if (HAS_QUIRK(config->quirks, QUIRK_DILE_VT_CREATE_EX) && DILE_VT_CreateEx != NULL) {
         INFO("[QUIRK_DILE_VT_CREATE_EX]: Attempting DILE_VT_CreateEx...");
-        vth = DILE_VT_CreateEx(0, 1);
-    } else {
-        INFO("Attempting DILE_VT_Create...");
-        vth = DILE_VT_Create(0);
+        return DILE_VT_CreateEx(0, 1);
     }
 
+    INFO("Attempting DILE_VT_Create...");
+    return DILE_VT_Create(0);
+}
+
+int capture_init(cap_backend_config_t* config, void** state_p)
+{
+    int ret = 0;
+
+    INFO("Capture start called.");
+
+    // Release before trying: a DILE_VT_Create that failed leaves libdile_vt in
+    // a state where retrying in this process fails too. A recorded owner that
+    // is gone can only have died without DILE_VT_Destroy. Never try while a
+    // running process holds it: a failed attempt would take its registration.
+    if (release_stale_owner() == OWNER_ALIVE) {
+        return -1;
+    }
+
+    // Recorded first, so even dying inside DILE_VT_Create stays recoverable
+    owner_record();
+    DILE_VT_HANDLE vth = create_handle(config);
     if (vth == NULL) {
         WARN("Failed to get DILE_VT context!");
+        // DILE_VT_Create doesn't undo HAL_VT_Init when it fails later on
+        if (DILE_VT_Finalize != NULL) {
+            DILE_VT_Finalize();
+        }
+        owner_clear();
         return -1;
     }
 
     dile_vt_backend_state_t* this = calloc(1, sizeof(dile_vt_backend_state_t));
     if (this == NULL) {
         DILE_VT_Destroy(vth);
+        owner_clear();
         return -1;
     }
     this->vth = vth;
