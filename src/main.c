@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "log.h"
 #include "service.h"
@@ -25,6 +26,19 @@ static gboolean quit_handler(gpointer user_data)
     INFO("%s detected, stopping...", (const char*)user_data);
     g_main_loop_quit(loop);
     return G_SOURCE_REMOVE;
+}
+
+// Crashes must not leave a DILE_VT handle open: the capture unit would stay
+// registered to our dead pid and capture would fail for every process (the
+// backend can repair that on the next start, but only if it recorded us).
+// Not async-signal-safe, but the process is going down anyway; the alarm
+// makes sure a hang inside the driver still ends it.
+static void fatal_signal_handler(int signum)
+{
+    signal(signum, SIG_DFL);
+    alarm(2);
+    unicapture_emergency_stop(&service.unicapture);
+    raise(signum);
 }
 
 static const struct option long_options[] = {
@@ -211,6 +225,12 @@ int main(int argc, char* argv[])
     // webOS stops services with SIGTERM; both paths shut capture down cleanly
     g_unix_signal_add(SIGINT, quit_handler, "SIGINT");
     g_unix_signal_add(SIGTERM, quit_handler, "SIGTERM");
+    g_unix_signal_add(SIGHUP, quit_handler, "SIGHUP");
+
+    const int fatal_signals[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT };
+    for (size_t i = 0; i < sizeof(fatal_signals) / sizeof(fatal_signals[0]); i++) {
+        signal(fatal_signals[i], fatal_signal_handler);
+    }
 
     if ((ret = service_init(&service, &settings)) != 0) {
         ERR("Service init failed: %d", ret);

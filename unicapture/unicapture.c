@@ -515,3 +515,27 @@ int unicapture_stop(unicapture_state_t* this)
 
     return 0;
 }
+
+void unicapture_emergency_stop(unicapture_state_t* this)
+{
+    // A process that dies with a DILE_VT handle open leaves the capture unit
+    // registered to its pid until the TV reboots, so release the video backend
+    // (not just stop it) before dying. The handle exists whenever the backend
+    // is loaded, even while capture is stopped.
+    capture_backend_t* video = this->video_capture;
+    if (video != NULL) {
+        this->video_capture = NULL;
+        if (this->video_capture_running && video->terminate != NULL) {
+            video->terminate(video->state);
+        }
+        this->video_capture_running = false;
+        if (video->cleanup != NULL) {
+            video->cleanup(video->state);
+        }
+    }
+
+    if (this->ui_capture_running && this->ui_capture != NULL && this->ui_capture->terminate != NULL) {
+        this->ui_capture_running = false;
+        this->ui_capture->terminate(this->ui_capture->state);
+    }
+}
