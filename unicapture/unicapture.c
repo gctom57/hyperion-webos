@@ -95,8 +95,10 @@ int unicapture_try_backends(cap_backend_config_t* config, capture_backend_t* bac
         }
     }
 
+    // The last backend's error is the most telling (candidates are ordered
+    // newest first, and missing libraries fail with -1 before the real one)
     ERR("Try backends failed!");
-    return -1;
+    return ret != 0 ? ret : -1;
 }
 
 void* unicapture_vsync_handler(void* data)
@@ -166,6 +168,11 @@ void* unicapture_run(void* data)
 
     while (this->running) {
         uint64_t now = getticks_us();
+
+        // The service may attach a video backend that loaded only later
+        if (video_capture == NULL) {
+            video_capture = __atomic_load_n(&this->video_capture, __ATOMIC_ACQUIRE);
+        }
 
         if ((now - last_ui_start) > 1000000 && ui_capture != NULL && !this->ui_capture_running) {
             last_ui_start = now;

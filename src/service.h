@@ -17,6 +17,8 @@ typedef struct {
 
     bool ui_backend_initialized;
     bool video_backend_initialized;
+    // Why the video backend isn't loaded (negative errno style), 0 if it is
+    int video_error;
 
     unicapture_state_t unicapture;
 

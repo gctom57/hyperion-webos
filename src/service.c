@@ -170,18 +170,50 @@ int service_init(service_t* service, settings_t* settings)
     return 0;
 }
 
+static void service_backend_config(service_t* service, cap_backend_config_t* config)
+{
+    config->resolution_width = service->settings->width;
+    config->resolution_height = service->settings->height;
+    config->fps = service->settings->fps;
+    config->quirks = service->settings->quirks;
+}
+
+// Loads the configured video backend into service->video_backend and records
+// why it failed in service->video_error. Doesn't attach it to unicapture.
+static int service_open_video_backend(service_t* service, cap_backend_config_t* config)
+{
+    settings_t* settings = service->settings;
+    const char* const video_backends[] = { "libvtcapture_backend.so", "libdile_vt_backend.so", NULL };
+    char backend_name[FILENAME_MAX] = { 0 };
+    int ret;
+
+    if (settings->no_video) {
+        INFO("Video capture disabled");
+        ret = -ENOENT;
+    } else if (!settings_backend_allowed(settings->video_backend, settings_video_backends)) {
+        ERR("Refusing unknown video backend: %s", settings->video_backend);
+        ret = -EINVAL;
+    } else if (settings->video_backend == NULL || settings->video_backend[0] == '\0' || strcmp(settings->video_backend, "auto") == 0) {
+        INFO("Autodetecting video backend...");
+        ret = unicapture_try_backends(config, &service->video_backend, video_backends);
+    } else {
+        snprintf(backend_name, sizeof(backend_name), "%s_backend.so", settings->video_backend);
+        ret = unicapture_init_backend(config, &service->video_backend, backend_name);
+    }
+
+    service->video_backend_initialized = ret == 0;
+    service->video_error = ret;
+    return ret;
+}
+
 void service_init_backends(service_t* service)
 {
     settings_t* settings = service->settings;
 
     cap_backend_config_t config;
-    config.resolution_width = settings->width;
-    config.resolution_height = settings->height;
-    config.fps = settings->fps;
-    config.quirks = settings->quirks;
+    service_backend_config(service, &config);
 
     const char* const ui_backends[] = { "libgm_backend.so", "libhalgal_backend.so", NULL };
-    const char* const video_backends[] = { "libvtcapture_backend.so", "libdile_vt_backend.so", NULL };
     char backend_name[FILENAME_MAX] = { 0 };
 
     // unicapture_init() clears these pointers, so re-attach backends that are
@@ -217,26 +249,56 @@ void service_init_backends(service_t* service)
         service->unicapture.video_capture = &service->video_backend;
     } else {
         service->unicapture.video_capture = NULL;
-
-        if (settings->no_video) {
-            INFO("Video capture disabled");
-        } else if (!settings_backend_allowed(settings->video_backend, settings_video_backends)) {
-            ERR("Refusing unknown video backend: %s", settings->video_backend);
-        } else {
-            if (settings->video_backend == NULL || settings->video_backend[0] == '\0' || strcmp(settings->video_backend, "auto") == 0) {
-                INFO("Autodetecting video backend...");
-                if (unicapture_try_backends(&config, &service->video_backend, video_backends) == 0) {
-                    service->unicapture.video_capture = &service->video_backend;
-                    service->video_backend_initialized = true;
-                }
-            } else {
-                snprintf(backend_name, sizeof(backend_name), "%s_backend.so", settings->video_backend);
-                if (unicapture_init_backend(&config, &service->video_backend, backend_name) == 0) {
-                    service->unicapture.video_capture = &service->video_backend;
-                    service->video_backend_initialized = true;
-                }
-            }
+        if (service_open_video_backend(service, &config) == 0) {
+            service->unicapture.video_capture = &service->video_backend;
         }
+    }
+}
+
+/*
+ * The video backend can fail to load while the UI one works, e.g. while
+ * another process holds VT capture. While capture runs, try again now and
+ * then and hand a backend that loads to the running capture loop, instead
+ * of staying without video until the next restart.
+ */
+static gboolean service_retry_video(gpointer data)
+{
+    service_t* service = (service_t*)data;
+    if (!service->running || service->video_backend_initialized || service->settings->no_video || getuid() != 0) {
+        return G_SOURCE_CONTINUE;
+    }
+
+    INFO("Video capture isn't available, trying again...");
+    cap_backend_config_t config;
+    service_backend_config(service, &config);
+    if (service_open_video_backend(service, &config) == 0) {
+        INFO("Video backend loaded, attaching it to the running capture");
+        __atomic_store_n(&service->unicapture.video_capture, &service->video_backend, __ATOMIC_RELEASE);
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+static const char* service_video_error_text(service_t* service)
+{
+    if (service->video_backend_initialized) {
+        return NULL;
+    }
+    if (getuid() != 0) {
+        return "Needs root";
+    }
+    switch (service->video_error) {
+    case 0:
+        return "Not loaded yet";
+    case -ENOENT:
+        return "Disabled in settings";
+    case -EINVAL:
+        return "Unknown backend in settings";
+    case -EBUSY:
+        return "Held by another process";
+    case -EIO:
+        return "Capture driver refused, a TV reboot may help";
+    default:
+        return "No video backend could be opened";
     }
 }
 
@@ -369,6 +431,8 @@ bool service_method_status(LSHandle* sh, LSMessage* msg, void* data)
     jobject_set(jobj, j_cstr_to_buffer("connected"), jboolean_create(service->connected));
     jobject_set(jobj, j_cstr_to_buffer("videoBackend"), service->video_backend.name ? jstring_create(service->video_backend.name) : jnull());
     jobject_set(jobj, j_cstr_to_buffer("videoRunning"), jboolean_create(service->unicapture.video_capture_running));
+    const char* video_error = service_video_error_text(service);
+    jobject_set(jobj, j_cstr_to_buffer("videoError"), video_error ? jstring_create(video_error) : jnull());
     jobject_set(jobj, j_cstr_to_buffer("uiBackend"), service->ui_backend.name ? jstring_create(service->ui_backend.name) : jnull());
     jobject_set(jobj, j_cstr_to_buffer("uiRunning"), jboolean_create(service->unicapture.ui_capture_running));
     jobject_set(jobj, j_cstr_to_buffer("framerate"), jnumber_create_f64(service->unicapture.metrics.framerate));
@@ -669,6 +733,8 @@ int service_register(service_t* service, GMainLoop* loop)
     LSCategorySetData(handle, "/", service, &lserror);
 
     LSGmainAttach(handle, loop, &lserror);
+
+    g_timeout_add_seconds(15, service_retry_video, service);
 
     if (!LSCall(handle, "luna://com.webos.service.tvpower/power/getPowerState", "{\"subscribe\":true}", power_callback, (void*)service, NULL, &lserror)) {
         WARN("Power state monitoring call failed: %s", lserror.message);
