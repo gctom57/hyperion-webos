@@ -36,6 +36,7 @@ pkg_check_modules(PMLOG REQUIRED PmLogLib)
 include_directories(${PMLOG_INCLUDE_DIRS})
 
 add_subdirectory(unicapture)
+add_subdirectory(tools/dile-vt)
 
 find_package(Git)
 add_custom_target(version
