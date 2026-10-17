@@ -104,7 +104,7 @@ void* connection_loop(void* data)
             service->connected = true;
             while (service->connection_loop_running) {
                 if (hyperion_read() < 0) {
-                    ERR("Error! Connection timeout.");
+                    ERR("Receiver connection lost.");
                     break;
                 }
             }
