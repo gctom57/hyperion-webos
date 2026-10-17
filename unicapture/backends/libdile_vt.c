@@ -185,7 +185,7 @@ int capture_init(cap_backend_config_t* config, void** state_p)
     // is gone can only have died without DILE_VT_Destroy. Never try while a
     // running process holds it: a failed attempt would take its registration.
     if (release_stale_owner() == OWNER_ALIVE) {
-        return -1;
+        return -EBUSY;
     }
 
     // Recorded first, so even dying inside DILE_VT_Create stays recoverable
@@ -198,7 +198,8 @@ int capture_init(cap_backend_config_t* config, void** state_p)
             DILE_VT_Finalize();
         }
         owner_clear();
-        return -1;
+        // Typically HAL_VT_Init refusing: the driver is held or stuck
+        return -EIO;
     }
 
     dile_vt_backend_state_t* this = calloc(1, sizeof(dile_vt_backend_state_t));
