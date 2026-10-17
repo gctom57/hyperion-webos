@@ -82,7 +82,9 @@ int hyperion_client(const char* origin, const char* hostname, int port, bool uni
     return 0;
 }
 
-static int _read_full(int fd, void* buffer, size_t size)
+// Returns 0 when `size` bytes were read, 1 when the receive timeout passed
+// before any byte arrived (and idle_ok is set), -1 on errors and EOF
+static int _read_full(int fd, void* buffer, size_t size, bool idle_ok)
 {
     size_t done = 0;
     while (done < size) {
@@ -90,6 +92,8 @@ static int _read_full(int fd, void* buffer, size_t size)
         if (n < 0) {
             if (errno == EINTR)
                 continue;
+            if (idle_ok && done == 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+                return 1;
             return -1;
         }
         if (n == 0) {
@@ -108,8 +112,15 @@ int hyperion_read()
     if (fd < 0)
         return -1;
 
+    // The receiver only talks when it has something to say (replies to our
+    // frames), so a quiet socket is not a dead one: report idle and let the
+    // caller keep waiting. A dead peer shows up as EOF, also after a failed
+    // send, which shuts the socket down.
     uint8_t headbuff[4];
-    if (_read_full(fd, headbuff, sizeof(headbuff)) != 0)
+    int ret = _read_full(fd, headbuff, sizeof(headbuff), true);
+    if (ret == 1)
+        return 0;
+    if (ret != 0)
         return -1;
 
     uint32_t messageSize = ((uint32_t)headbuff[0] << 24) | ((uint32_t)headbuff[1] << 16) | ((uint32_t)headbuff[2] << 8) | (uint32_t)headbuff[3];
@@ -118,7 +129,7 @@ int hyperion_read()
         return -1;
     }
 
-    if (_read_full(fd, recvBuff, messageSize) != 0)
+    if (_read_full(fd, recvBuff, messageSize, false) != 0)
         return -1;
 
     int verify = hyperionnet_Reply_verify_as_root(recvBuff, messageSize);
