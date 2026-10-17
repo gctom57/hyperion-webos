@@ -155,6 +155,8 @@ void* unicapture_run(void* data)
     size_t blend_alpha_y_capacity = 0;
     uint8_t* ui_scaled = NULL;
     size_t ui_scaled_capacity = 0;
+    unsigned int video_fail_count = 0;
+    unsigned int ui_mismatch_count = 0;
 
     __atomic_store_n(&this->video_restart_requested, false, __ATOMIC_RELEASE);
     this->vsync_thread_running = true;
@@ -209,8 +211,13 @@ void* unicapture_run(void* data)
 
         if (this->video_capture_running && !video_restart) {
             if ((ret = video_capture->acquire_frame(video_capture->state, &video_frame)) != 0) {
-                DBG("video_capture acquire_frame failed: %d", ret);
+                // Can fail on every frame for a while; don't flood the log
+                if (video_fail_count++ % 300 == 0) {
+                    DBG("video_capture acquire_frame failed: %d (%u times)", ret, video_fail_count);
+                }
                 video_frame.pixel_format = PIXFMT_INVALID;
+            } else {
+                video_fail_count = 0;
             }
         }
 
@@ -237,8 +244,10 @@ void* unicapture_run(void* data)
                 ui_source.planes[0].buffer = ui_scaled;
                 ui_source.planes[0].stride = width * 4;
             } else {
-                DBG("UI frame %dx%d can't be matched to video %dx%d, sending video only",
-                    ui_frame.width, ui_frame.height, width, height);
+                if (ui_mismatch_count++ % 300 == 0) {
+                    DBG("UI frame %dx%d can't be matched to video %dx%d, sending video only",
+                        ui_frame.width, ui_frame.height, width, height);
+                }
                 ui_source.pixel_format = PIXFMT_INVALID;
             }
         }
@@ -428,13 +437,16 @@ void* unicapture_run(void* data)
             if (framecounter % 60 == 0) {
                 double fps = (60 * 1000000.0) / (getticks_us() - framecounter_start);
                 this->metrics.framerate = fps;
-                DBG("Framerate: %.6f FPS; timings - wait: %lldus, acquire: %lldus, convert: %lldus, process; %lldus, send: %lldus, release: %lldus",
-                    fps, frame_wait - frame_start, frame_acquired - frame_wait, frame_converted - frame_acquired, frame_processed - frame_converted, frame_sent - frame_processed, frame_released - frame_sent);
-
-                DBG("        UI: pixfmt: %d; %dx%d", ui_frame.pixel_format, ui_frame.width, ui_frame.height);
-                DBG("     VIDEO: pixfmt: %d; %dx%d", video_frame.pixel_format, video_frame.width, video_frame.height);
-                DBG("CONV    UI: pixfmt: %d; %dx%d", ui_frame_converted.pixel_format, ui_frame_converted.width, ui_frame_converted.height);
-                DBG("CONV VIDEO: pixfmt: %d; %dx%d", video_frame_converted.pixel_format, video_frame_converted.width, video_frame_converted.height);
+                // One line every ~20 s at 30 fps: with "Setup logging" debug
+                // output goes to the TV's RAM-backed /var/log
+                if (framecounter % 600 == 0) {
+                    DBG("%.1f fps; us wait %lld acquire %lld convert %lld process %lld send %lld release %lld; "
+                        "UI fmt %d %dx%d -> %dx%d; video fmt %d %dx%d -> %dx%d",
+                        fps, frame_wait - frame_start, frame_acquired - frame_wait, frame_converted - frame_acquired,
+                        frame_processed - frame_converted, frame_sent - frame_processed, frame_released - frame_sent,
+                        ui_frame.pixel_format, ui_frame.width, ui_frame.height, ui_frame_converted.width, ui_frame_converted.height,
+                        video_frame.pixel_format, video_frame.width, video_frame.height, video_frame_converted.width, video_frame_converted.height);
+                }
 
                 framecounter_start = getticks_us();
             }

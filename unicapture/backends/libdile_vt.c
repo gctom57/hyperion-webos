@@ -250,14 +250,23 @@ int capture_init(cap_backend_config_t* config, void** state_p)
 
     DILE_VT_RECT region = { 0, 0, config->resolution_width, config->resolution_height };
 
-    if (region.width < limitation.scaleDownLimitWidth || region.height < limitation.scaleDownLimitHeight) {
-        WARN("scaledown is limited to %dx%d while %dx%d has been chosen - there's a chance this will crash!", limitation.scaleDownLimitWidth, limitation.scaleDownLimitHeight, region.width, region.height);
-    }
+    bool below_limit = region.width < limitation.scaleDownLimitWidth || region.height < limitation.scaleDownLimitHeight;
 
     if (DILE_VT_SetVideoFrameOutputDeviceOutputRegion(vth, dump_location, &region) != 0) {
         ERR("[DILE_VT] SetVideoFrameOutputDeviceOutputRegion failed!");
+        if (below_limit) {
+            WARN("[DILE_VT] %dx%d is below the reported scale-down limit %dx%d; try a larger resolution",
+                region.width, region.height, limitation.scaleDownLimitWidth, limitation.scaleDownLimitHeight);
+        }
         ret = -3;
         goto err_destroy;
+    }
+
+    // Drivers report a scale-down limit (320x240 on a webOS 3.5 C7) but
+    // accept smaller regions and deliver correct frames, e.g. 320x180
+    if (below_limit) {
+        INFO("[DILE_VT] %dx%d is below the reported scale-down limit %dx%d; the driver accepted it",
+            region.width, region.height, limitation.scaleDownLimitWidth, limitation.scaleDownLimitHeight);
     }
 
     this->output_state.enabled = 0;
