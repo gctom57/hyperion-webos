@@ -45,9 +45,6 @@ typedef struct _dile_vt_backend_state {
  */
 #define DILE_VT_OWNER_FILE "/tmp/piccap-dilevt.pid"
 
-// In every libdile_vt we know of, but not in the tv-native-apis header
-int DILE_VT_Finalize(void) __attribute__((weak));
-
 typedef enum {
     OWNER_NONE, // nothing recorded, or released now
     OWNER_ALIVE, // another running process holds VT capture
@@ -274,9 +271,9 @@ int capture_init(cap_backend_config_t* config, void** state_p)
     this->output_state.framerate = config->fps == 0 ? 1 : 60 / config->fps;
     INFO("[DILE_VT] framerate divider: %d", this->output_state.framerate);
 
-    DILE_VT_WaitVsync(vth, 0, 0);
+    DILE_VT_WaitVsync(vth);
     uint64_t t1 = getticks_us();
-    DILE_VT_WaitVsync(vth, 0, 0);
+    DILE_VT_WaitVsync(vth);
     uint64_t t2 = getticks_us();
 
     double fps = 1000000.0 / (t2 - t1);
@@ -289,9 +286,9 @@ int capture_init(cap_backend_config_t* config, void** state_p)
         goto err_destroy;
     }
 
-    DILE_VT_WaitVsync(vth, 0, 0);
+    DILE_VT_WaitVsync(vth);
     t1 = getticks_us();
-    DILE_VT_WaitVsync(vth, 0, 0);
+    DILE_VT_WaitVsync(vth);
     t2 = getticks_us();
 
     fps = 1000000.0 / (t2 - t1);
@@ -382,8 +379,12 @@ int capture_cleanup(void* state)
 
 int capture_start(void* state)
 {
-    dile_vt_backend_state_t* this = (dile_vt_backend_state_t*)state;
-    if (DILE_VT_Start(this->vth) != 0) {
+    (void)state;
+    // DILE_VT_Start is libdile_vt's cross-process VT lock, held while
+    // capturing. This used to pass the handle as pWaitTime, whose first
+    // field (the video window, 0) meant "don't wait"; keep that.
+    unsigned int wait_ms = 0;
+    if (DILE_VT_Start(&wait_ms) != 0) {
         return -1;
     }
     return 0;
@@ -391,8 +392,8 @@ int capture_start(void* state)
 
 int capture_terminate(void* state)
 {
-    dile_vt_backend_state_t* this = (dile_vt_backend_state_t*)state;
-    DILE_VT_Stop(this->vth);
+    (void)state;
+    DILE_VT_Stop();
     return 0;
 }
 
@@ -458,6 +459,6 @@ int capture_release_frame(void* state, frame_info_t* frame __attribute__((unused
 int capture_wait(void* state)
 {
     dile_vt_backend_state_t* this = (dile_vt_backend_state_t*)state;
-    DILE_VT_WaitVsync(this->vth, 0, 0);
+    DILE_VT_WaitVsync(this->vth);
     return 0;
 }
