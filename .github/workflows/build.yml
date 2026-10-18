@@ -91,7 +91,7 @@ jobs:
     - name: Install build dependencies
       run: |
         sudo apt-get update -qq
-        sudo apt-get install -y -qq cmake gcc g++ pkg-config libglib2.0-dev libyajl-dev libgmp-dev \
+        sudo apt-get install -y -qq cmake gcc g++ pkg-config libglib2.0-dev libyajl-dev libgmp-dev libyuv-dev \
           liburiparser-dev gperf flex bison lemon ragel libboost-dev libboost-system-dev \
           libboost-regex-dev libboost-filesystem-dev libboost-program-options-dev
 

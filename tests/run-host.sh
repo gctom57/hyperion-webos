@@ -15,6 +15,10 @@ gcc $FLAGS -Isrc -Itests tests/test_settings.c tests/log_stub.c src/settings.c $
 gcc $FLAGS -Isrc -Itests tests/test_receiver.c tests/log_stub.c src/receiver_test.c -o "$OUT/test_receiver"
 # shellcheck disable=SC2086
 gcc $FLAGS -Isrc -Itests tests/test_lockdown.c tests/log_stub.c src/lockdown.c -o "$OUT/test_lockdown"
+# The capture loop with a fake backend; needs libyuv (libyuv-dev)
+# shellcheck disable=SC2086
+gcc $FLAGS -Isrc -Iunicapture -Itests tests/test_unicapture.c tests/log_stub.c unicapture/unicapture.c \
+    unicapture/converter.c src/utils.c -lyuv -lpthread -ldl -o "$OUT/test_unicapture"
 
 # hyperion_client needs flatcc at the same commit as fbs/CMakeLists.txt, plus
 # the verifier and reply builder for the fake receiver
@@ -42,7 +46,7 @@ gcc $FLAGS -Isrc -Itests -isystem "$OUT/fbs" -isystem "$FLATCC_SRC/include" test
     src/hyperion_client.c $RT -lpthread -o "$OUT/test_hyperion_client"
 
 status=0
-for t in test_settings test_receiver test_lockdown test_hyperion_client; do
+for t in test_settings test_receiver test_lockdown test_hyperion_client test_unicapture; do
     echo "== $t"
     "$OUT/$t" || status=1
 done

@@ -3,6 +3,7 @@
 #include "log.h"
 #include "utils.h"
 #include <dlfcn.h>
+#include <inttypes.h>
 #include <libyuv.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -162,6 +163,7 @@ void* unicapture_run(void* data)
     unsigned int ui_mismatch_count = 0;
     // Stage times summed over the current 60-frame window
     uint64_t sum_wait = 0, sum_acquire = 0, sum_convert = 0, sum_process = 0, sum_send = 0;
+    uint32_t vsync_seen = 0;
 
     __atomic_store_n(&this->video_restart_requested, false, __ATOMIC_RELEASE);
     this->vsync_thread_running = true;
@@ -200,8 +202,14 @@ void* unicapture_run(void* data)
         int ret = 0;
         uint64_t frame_start = getticks_us();
 
+        // Wait on the vsync count, not just the signal: a vsync that came
+        // while the previous frame was still being processed is used right
+        // away instead of being lost (which cost a whole extra period)
         pthread_mutex_lock(&this->vsync_lock);
-        pthread_cond_wait(&this->vsync_cond, &this->vsync_lock);
+        while (__atomic_load_n(&this->metrics.vsyncs, __ATOMIC_RELAXED) == vsync_seen && this->running) {
+            pthread_cond_wait(&this->vsync_cond, &this->vsync_lock);
+        }
+        vsync_seen = __atomic_load_n(&this->metrics.vsyncs, __ATOMIC_RELAXED);
         pthread_mutex_unlock(&this->vsync_lock);
         __atomic_add_fetch(&this->metrics.wakeups, 1, __ATOMIC_RELAXED);
         uint64_t frame_wait = getticks_us();
@@ -464,7 +472,8 @@ void* unicapture_run(void* data)
                 // One line every ~20 s at 30 fps: with "Setup logging" debug
                 // output goes to the TV's RAM-backed /var/log
                 if (framecounter % 600 == 0) {
-                    DBG("%.1f fps; us wait %lld acquire %lld convert %lld process %lld send %lld release %lld; "
+                    DBG("%.1f fps; us wait %" PRIu64 " acquire %" PRIu64 " convert %" PRIu64 " process %" PRIu64 " send %" PRIu64
+                        " release %" PRIu64 "; "
                         "UI fmt %d %dx%d -> %dx%d; video fmt %d %dx%d -> %dx%d",
                         fps, frame_wait - frame_start, frame_acquired - frame_wait, frame_converted - frame_acquired,
                         frame_processed - frame_converted, frame_sent - frame_processed, frame_released - frame_sent,
