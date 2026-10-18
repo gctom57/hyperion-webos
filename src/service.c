@@ -3,8 +3,10 @@
 #include "json_rpc_client.h"
 #include "log.h"
 #include "pthread.h"
+#include "receiver_test.h"
 #include "settings.h"
 #include "unicapture.h"
+#include "utils.h"
 #include "version.h"
 #include <errno.h>
 #include <luna-service2/lunaservice.h>
@@ -124,9 +126,70 @@ void* connection_loop(void* data)
     return 0;
 }
 
+/*
+ * Live preview for the app: a small copy of the frames being sent, kept only
+ * while someone asked for it in the last few seconds (getPreview), and
+ * refreshed every 10th frame so it costs next to nothing.
+ */
+#define PREVIEW_WIDTH 64
+#define PREVIEW_HEIGHT 36
+#define PREVIEW_KEEP_US (5 * 1000000ULL)
+
+static pthread_mutex_t preview_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint8_t preview_rgb[PREVIEW_WIDTH * PREVIEW_HEIGHT * 3];
+static bool preview_valid = false;
+static uint64_t preview_wanted_until = 0;
+static unsigned int preview_frame = 0;
+
+static bool preview_wanted(void)
+{
+    uint64_t until = __atomic_load_n(&preview_wanted_until, __ATOMIC_RELAXED);
+    return until != 0 && getticks_us() < until && preview_frame++ % 10 == 0;
+}
+
+static void preview_from_rgb(const uint8_t* rgb, int width, int height)
+{
+    pthread_mutex_lock(&preview_lock);
+    for (size_t y = 0; y < PREVIEW_HEIGHT; y++) {
+        size_t sy = y * (size_t)height / PREVIEW_HEIGHT;
+        for (size_t x = 0; x < PREVIEW_WIDTH; x++) {
+            size_t sx = x * (size_t)width / PREVIEW_WIDTH;
+            memcpy(&preview_rgb[(y * PREVIEW_WIDTH + x) * 3], &rgb[(sy * (size_t)width + sx) * 3], 3);
+        }
+    }
+    preview_valid = true;
+    pthread_mutex_unlock(&preview_lock);
+}
+
+// NV12 frames: the luma plane is enough for a recognisable thumbnail
+static void preview_from_luma(const uint8_t* luma, int width, int height, int stride)
+{
+    pthread_mutex_lock(&preview_lock);
+    for (size_t y = 0; y < PREVIEW_HEIGHT; y++) {
+        size_t sy = y * (size_t)height / PREVIEW_HEIGHT;
+        for (size_t x = 0; x < PREVIEW_WIDTH; x++) {
+            size_t sx = x * (size_t)width / PREVIEW_WIDTH;
+            uint8_t v = luma[sy * (size_t)stride + sx];
+            memset(&preview_rgb[(y * PREVIEW_WIDTH + x) * 3], v, 3);
+        }
+    }
+    preview_valid = true;
+    pthread_mutex_unlock(&preview_lock);
+}
+
+static void preview_invalidate(void)
+{
+    pthread_mutex_lock(&preview_lock);
+    preview_valid = false;
+    pthread_mutex_unlock(&preview_lock);
+}
+
 int service_feed_frame(void* data __attribute__((unused)), int width, int height, uint8_t* rgb_data)
 {
     int ret;
+    if (preview_wanted()) {
+        preview_from_rgb(rgb_data, width, height);
+    }
     if ((ret = hyperion_set_image(rgb_data, width, height)) != 0) {
         WARN("Frame sending failed: %d", ret);
     }
@@ -137,6 +200,9 @@ int service_feed_frame(void* data __attribute__((unused)), int width, int height
 int service_feed_nv12_frame(void* data __attribute__((unused)), int width, int height, uint8_t* y, uint8_t* uv, int stride_y, int stride_uv)
 {
     int ret;
+    if (preview_wanted()) {
+        preview_from_luma(y, width, height, stride_y);
+    }
     if ((ret = hyperion_set_nv12_image(y, uv, width, height, stride_y, stride_uv)) != 0) {
         WARN("Frame sending failed: %d", ret);
     }
@@ -373,6 +439,7 @@ int service_stop(service_t* service)
     unicapture_stop(&service->unicapture);
     pthread_join(service->connection_thread, NULL);
     service->running = false;
+    preview_invalidate();
 
     // Backends stay loaded: on some TVs (seen on webOS 4) DILE_VT can't be
     // created again after DILE_VT_Destroy, so stop/start and power pauses
@@ -601,12 +668,159 @@ bool service_method_set_settings(LSHandle* sh, LSMessage* msg, void* data)
     return true;
 }
 
+/*
+ * testReceiver can take seconds, so it runs in a worker thread and
+ * replies from the main loop, which keeps serving other calls meanwhile.
+ */
+typedef struct {
+    LSHandle* sh;
+    LSMessage* msg;
+    jvalue_ref reply;
+    char address[64];
+    int port;
+} async_call_t;
+
+static gboolean async_call_reply(gpointer data)
+{
+    async_call_t* call = (async_call_t*)data;
+    LSError lserror;
+    LSErrorInit(&lserror);
+    LSMessageReply(call->sh, call->msg, jvalue_tostring_simple(call->reply), &lserror);
+    LSErrorFree(&lserror);
+    LSMessageUnref(call->msg);
+    j_release(&call->reply);
+    free(call);
+    return G_SOURCE_REMOVE;
+}
+
+static void reply_error(LSHandle* sh, LSMessage* msg, const char* text)
+{
+    LSError lserror;
+    LSErrorInit(&lserror);
+    jvalue_ref jobj = jobject_create();
+    jobject_set(jobj, j_cstr_to_buffer("returnValue"), jboolean_create(false));
+    jobject_set(jobj, j_cstr_to_buffer("errorText"), jstring_create(text));
+    LSMessageReply(sh, msg, jvalue_tostring_simple(jobj), &lserror);
+    j_release(&jobj);
+    LSErrorFree(&lserror);
+}
+
+static bool start_async(LSHandle* sh, LSMessage* msg, async_call_t* call, void* (*worker)(void*))
+{
+    call->sh = sh;
+    call->msg = msg;
+    LSMessageRef(msg);
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, worker, call) != 0) {
+        LSMessageUnref(msg);
+        free(call);
+        reply_error(sh, msg, "Unable to start worker thread");
+        return false;
+    }
+    pthread_detach(thread);
+    return true;
+}
+
+static void* test_receiver_worker(void* data)
+{
+    async_call_t* call = (async_call_t*)data;
+    char err[96];
+    int ret = receiver_test_tcp(call->address, call->port, 2000, err, sizeof(err));
+
+    call->reply = jobject_create();
+    jobject_set(call->reply, j_cstr_to_buffer("returnValue"), jboolean_create(true));
+    jobject_set(call->reply, j_cstr_to_buffer("reachable"), jboolean_create(ret == 0));
+    if (ret != 0) {
+        jobject_set(call->reply, j_cstr_to_buffer("errorText"), jstring_create(err));
+    } else {
+        // Optional: which receiver it is, from its JSON-RPC web port
+        AmbientLightingDaemon flavor = DAEMON_NOT_SET;
+        if (get_daemon_flavor(call->address, RPC_PORT, &flavor) == 0 && flavor > DAEMON_NOT_SET) {
+            jobject_set(call->reply, j_cstr_to_buffer("flavor"), jstring_create(daemon_to_string(flavor)));
+        }
+    }
+    g_idle_add(async_call_reply, call);
+    return NULL;
+}
+
+bool service_method_test_receiver(LSHandle* sh, LSMessage* msg, void* data __attribute__((unused)))
+{
+    if (!service_caller_allowed(sh, msg)) {
+        return true;
+    }
+
+    JSchemaInfo schema;
+    jschema_info_init(&schema, jschema_all(), NULL, NULL);
+    jvalue_ref parsed = jdom_parse(j_cstr_to_buffer(LSMessageGetPayload(msg)), DOMOPT_NOOPT, &schema);
+    jvalue_ref address = jobject_get(parsed, j_cstr_to_buffer("address"));
+    jvalue_ref port = jobject_get(parsed, j_cstr_to_buffer("port"));
+    if (jis_null(parsed) || !jis_string(address)) {
+        j_release(&parsed);
+        reply_error(sh, msg, "address missing");
+        return true;
+    }
+
+    async_call_t* call = calloc(1, sizeof(async_call_t));
+    if (call == NULL) {
+        j_release(&parsed);
+        reply_error(sh, msg, "Out of memory");
+        return true;
+    }
+    raw_buffer str = jstring_get(address);
+    snprintf(call->address, sizeof(call->address), "%s", str.m_str);
+    jstring_free_buffer(str);
+    call->port = 19400;
+    if (jis_number(port)) {
+        jnumber_get_i32(port, &call->port);
+    }
+    j_release(&parsed);
+
+    if (!settings_address_valid(call->address, false)) {
+        free(call);
+        reply_error(sh, msg, "address must be an IPv4 address");
+        return true;
+    }
+    start_async(sh, msg, call, test_receiver_worker);
+    return true;
+}
+
+bool service_method_get_preview(LSHandle* sh, LSMessage* msg, void* data __attribute__((unused)))
+{
+    // The preview shows what is on screen: same callers as start/stop
+    if (!service_caller_allowed(sh, msg)) {
+        return true;
+    }
+    __atomic_store_n(&preview_wanted_until, getticks_us() + PREVIEW_KEEP_US, __ATOMIC_RELAXED);
+
+    jvalue_ref jobj = jobject_create();
+    jobject_set(jobj, j_cstr_to_buffer("returnValue"), jboolean_create(true));
+    pthread_mutex_lock(&preview_lock);
+    jobject_set(jobj, j_cstr_to_buffer("available"), jboolean_create(preview_valid));
+    if (preview_valid) {
+        gchar* b64 = g_base64_encode(preview_rgb, sizeof(preview_rgb));
+        jobject_set(jobj, j_cstr_to_buffer("width"), jnumber_create_i32(PREVIEW_WIDTH));
+        jobject_set(jobj, j_cstr_to_buffer("height"), jnumber_create_i32(PREVIEW_HEIGHT));
+        jobject_set(jobj, j_cstr_to_buffer("rgb"), jstring_create(b64));
+        g_free(b64);
+    }
+    pthread_mutex_unlock(&preview_lock);
+
+    LSError lserror;
+    LSErrorInit(&lserror);
+    LSMessageReply(sh, msg, jvalue_tostring_simple(jobj), &lserror);
+    j_release(&jobj);
+    LSErrorFree(&lserror);
+    return true;
+}
+
 LSMethod methods[] = {
     { "start", service_method_start, LUNA_METHOD_FLAGS_NONE },
     { "stop", service_method_stop, LUNA_METHOD_FLAGS_NONE },
     { "status", service_method_status, LUNA_METHOD_FLAGS_NONE },
     { "getSettings", service_method_get_settings, LUNA_METHOD_FLAGS_NONE },
     { "setSettings", service_method_set_settings, LUNA_METHOD_FLAGS_NONE },
+    { "testReceiver", service_method_test_receiver, LUNA_METHOD_FLAGS_NONE },
+    { "getPreview", service_method_get_preview, LUNA_METHOD_FLAGS_NONE },
     { 0, 0, 0 }
 };
 
