@@ -16,8 +16,33 @@ gcc $FLAGS -Isrc -Itests tests/test_receiver.c tests/log_stub.c src/receiver_tes
 # shellcheck disable=SC2086
 gcc $FLAGS -Isrc -Itests tests/test_lockdown.c tests/log_stub.c src/lockdown.c -o "$OUT/test_lockdown"
 
+# hyperion_client needs flatcc at the same commit as fbs/CMakeLists.txt, plus
+# the verifier and reply builder for the fake receiver
+FLATCC_REF=29201734bf2d12713a7a1a035d31e5123aac9c93
+FLATCC_SRC="$OUT/flatcc"
+if [ ! -x "$FLATCC_SRC/bin/flatcc" ]; then
+    rm -rf "$FLATCC_SRC" && mkdir -p "$FLATCC_SRC"
+    git -C "$FLATCC_SRC" init -q
+    git -C "$FLATCC_SRC" fetch -q --depth 1 https://github.com/dvidelabs/flatcc.git "$FLATCC_REF"
+    git -C "$FLATCC_SRC" checkout -q FETCH_HEAD
+    cmake -S "$FLATCC_SRC" -B "$FLATCC_SRC/build" -DFLATCC_TEST=OFF -DCMAKE_BUILD_TYPE=Release >/dev/null
+    cmake --build "$FLATCC_SRC/build" -j"$(nproc)" >/dev/null
+fi
+mkdir -p "$OUT/fbs"
+"$FLATCC_SRC/bin/flatcc" -a -o "$OUT/fbs" fbs/hyperion_reply.fbs fbs/hyperion_request.fbs
+RT=""
+for f in builder emitter refmap verifier; do
+    # Third-party runtime: sanitized, but not held to our warning flags
+    # shellcheck disable=SC2086
+    gcc ${FLAGS/-Werror/} -w -isystem "$FLATCC_SRC/include" -c "$FLATCC_SRC/src/runtime/$f.c" -o "$OUT/flatcc_$f.o"
+    RT="$RT $OUT/flatcc_$f.o"
+done
+# shellcheck disable=SC2086
+gcc $FLAGS -Isrc -Itests -isystem "$OUT/fbs" -isystem "$FLATCC_SRC/include" tests/test_hyperion_client.c tests/log_stub.c \
+    src/hyperion_client.c $RT -lpthread -o "$OUT/test_hyperion_client"
+
 status=0
-for t in test_settings test_receiver test_lockdown; do
+for t in test_settings test_receiver test_lockdown test_hyperion_client; do
     echo "== $t"
     "$OUT/$t" || status=1
 done
