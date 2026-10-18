@@ -256,7 +256,7 @@ int get_daemon_flavor(char* host, ushort rpc_port, AmbientLightingDaemon* flavor
     jvalue_ref daemon_node;
     jvalue_ref response_body_jval;
     jvalue_ref post_body = jobject_create();
-    jobject_set(post_body, j_cstr_to_buffer("command"), jstring_create("sysinfo"));
+    jobject_put(post_body, J_CSTR_TO_JVAL("command"), jstring_create("sysinfo"));
 
     if ((ret = send_rpc_message(host, rpc_port, post_body, &response_body_jval)) != 0) {
         WARN("get_daemon_flavor: Failed to send RPC message, code: %d", ret);
@@ -313,8 +313,8 @@ int set_hdr_state(char* host, ushort rpc_port, DynamicRange range)
     jvalue_ref response_body_jval;
     jvalue_ref post_body = jobject_create();
 
-    jobject_set(post_body, j_cstr_to_buffer("command"), jstring_create("videomodehdr"));
-    jobject_set(post_body, j_cstr_to_buffer("HDR"), jnumber_create_i32(1));
+    jobject_put(post_body, J_CSTR_TO_JVAL("command"), jstring_create("videomodehdr"));
+    jobject_put(post_body, J_CSTR_TO_JVAL("HDR"), jnumber_create_i32(1));
 
     const char* lut_filename = "";
     switch (range) {
@@ -328,7 +328,7 @@ int set_hdr_state(char* host, ushort rpc_port, DynamicRange range)
         lut_filename = LUT_FILENAME_DOLBYVISION;
         break;
     }
-    jobject_set(post_body, j_cstr_to_buffer("flatbuffers_user_lut_filename"), jstring_create(lut_filename));
+    jobject_put(post_body, J_CSTR_TO_JVAL("flatbuffers_user_lut_filename"), jstring_create(lut_filename));
 
     if ((ret = send_rpc_message(host, rpc_port, post_body, &response_body_jval)) != 0) {
         WARN("set_hdr_state: Failed to send RPC message, code: %d", ret);
