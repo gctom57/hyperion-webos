@@ -1,9 +1,9 @@
 #include "service.h"
-#include "discovery.h"
 #include "hyperion_client.h"
 #include "json_rpc_client.h"
 #include "log.h"
 #include "pthread.h"
+#include "receiver_test.h"
 #include "settings.h"
 #include "unicapture.h"
 #include "utils.h"
@@ -669,8 +669,8 @@ bool service_method_set_settings(LSHandle* sh, LSMessage* msg, void* data)
 }
 
 /*
- * discover and testReceiver take seconds, so they run in a worker thread and
- * reply from the main loop, which keeps serving other calls meanwhile.
+ * testReceiver can take seconds, so it runs in a worker thread and
+ * replies from the main loop, which keeps serving other calls meanwhile.
  */
 typedef struct {
     LSHandle* sh;
@@ -721,52 +721,11 @@ static bool start_async(LSHandle* sh, LSMessage* msg, async_call_t* call, void* 
     return true;
 }
 
-static void* discover_worker(void* data)
-{
-    async_call_t* call = (async_call_t*)data;
-    receiver_info_t found[8];
-    int count = discovery_search(found, 8, 2000);
-
-    jvalue_ref list = jarray_create(NULL);
-    for (int i = 0; i < count; i++) {
-        jvalue_ref item = jobject_create();
-        jobject_set(item, j_cstr_to_buffer("address"), jstring_create(found[i].address));
-        jobject_set(item, j_cstr_to_buffer("name"), jstring_create(found[i].name));
-        jobject_set(item, j_cstr_to_buffer("flavor"), jstring_create(found[i].flavor));
-        jobject_set(item, j_cstr_to_buffer("port"), jnumber_create_i32(found[i].flatbuffer_port));
-        jobject_set(item, j_cstr_to_buffer("jsonPort"), jnumber_create_i32(found[i].json_port));
-        jarray_append(list, item);
-    }
-
-    call->reply = jobject_create();
-    jobject_set(call->reply, j_cstr_to_buffer("returnValue"), jboolean_create(count >= 0));
-    jobject_set(call->reply, j_cstr_to_buffer("receivers"), list);
-    if (count < 0) {
-        jobject_set(call->reply, j_cstr_to_buffer("errorText"), jstring_create("Network search failed"));
-    }
-    g_idle_add(async_call_reply, call);
-    return NULL;
-}
-
-bool service_method_discover(LSHandle* sh, LSMessage* msg, void* data __attribute__((unused)))
-{
-    if (!service_caller_allowed(sh, msg)) {
-        return true;
-    }
-    async_call_t* call = calloc(1, sizeof(async_call_t));
-    if (call == NULL) {
-        reply_error(sh, msg, "Out of memory");
-        return true;
-    }
-    start_async(sh, msg, call, discover_worker);
-    return true;
-}
-
 static void* test_receiver_worker(void* data)
 {
     async_call_t* call = (async_call_t*)data;
     char err[96];
-    int ret = discovery_test_tcp(call->address, call->port, 2000, err, sizeof(err));
+    int ret = receiver_test_tcp(call->address, call->port, 2000, err, sizeof(err));
 
     call->reply = jobject_create();
     jobject_set(call->reply, j_cstr_to_buffer("returnValue"), jboolean_create(true));
@@ -860,7 +819,6 @@ LSMethod methods[] = {
     { "status", service_method_status, LUNA_METHOD_FLAGS_NONE },
     { "getSettings", service_method_get_settings, LUNA_METHOD_FLAGS_NONE },
     { "setSettings", service_method_set_settings, LUNA_METHOD_FLAGS_NONE },
-    { "discover", service_method_discover, LUNA_METHOD_FLAGS_NONE },
     { "testReceiver", service_method_test_receiver, LUNA_METHOD_FLAGS_NONE },
     { "getPreview", service_method_get_preview, LUNA_METHOD_FLAGS_NONE },
     { 0, 0, 0 }

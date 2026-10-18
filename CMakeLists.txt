@@ -54,7 +54,7 @@ add_executable(hyperion-webos
     src/utils.c
     src/hyperion_client.c
     src/json_rpc_client.c
-    src/discovery.c
+    src/receiver_test.c
 )
 set_target_properties(hyperion-webos PROPERTIES
     BUILD_RPATH_USE_ORIGIN ON
