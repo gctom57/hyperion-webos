@@ -1,6 +1,7 @@
 #include "settings.h"
 #include "log.h"
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -339,8 +340,13 @@ int settings_save_file(settings_t* settings, char* target)
         return -1;
     }
 
-    FILE* fd = fopen(tmp_path, "wb");
+    // Only root (the service) needs to read the receiver settings
+    int raw_fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+    FILE* fd = raw_fd >= 0 ? fdopen(raw_fd, "wb") : NULL;
     if (fd == NULL) {
+        if (raw_fd >= 0) {
+            close(raw_fd);
+        }
         j_release(&jobj);
         return -1;
     }

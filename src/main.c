@@ -8,6 +8,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "lockdown.h"
 #include "log.h"
 #include "service.h"
 #include "settings.h"
@@ -198,6 +199,11 @@ int main(int argc, char* argv[])
         INFO("Running via CLI");
     } else {
         INFO("Running as a service");
+        // Before anything is loaded from it: once we run as root, nobody else
+        // may be able to swap the binary, a backend or the config
+        if (getuid() == 0) {
+            lockdown_dir(SERVICE_INSTALL_DIR);
+        }
         settings_load_file(&settings, SETTINGS_PERSISTENCE_PATH);
     }
 

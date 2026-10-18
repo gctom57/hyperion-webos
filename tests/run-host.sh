@@ -13,10 +13,17 @@ DEPS="$(pkg-config --cflags --libs pbnjson_c glib-2.0)"
 gcc $FLAGS -Isrc -Itests tests/test_settings.c tests/log_stub.c src/settings.c $DEPS -o "$OUT/test_settings"
 # shellcheck disable=SC2086
 gcc $FLAGS -Isrc -Itests tests/test_receiver.c tests/log_stub.c src/receiver_test.c -o "$OUT/test_receiver"
+# shellcheck disable=SC2086
+gcc $FLAGS -Isrc -Itests tests/test_lockdown.c tests/log_stub.c src/lockdown.c -o "$OUT/test_lockdown"
 
 status=0
-for t in test_settings test_receiver; do
+for t in test_settings test_receiver test_lockdown; do
     echo "== $t"
     "$OUT/$t" || status=1
 done
+# Ownership changes need root; run that test again with sudo when available
+if [ "$(id -u)" != 0 ] && sudo -n true 2>/dev/null; then
+    echo "== test_lockdown (root)"
+    sudo -n "$OUT/test_lockdown" || status=1
+fi
 exit $status
