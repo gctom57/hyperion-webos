@@ -62,7 +62,7 @@ jobs:
 
     - uses: DoozyX/clang-format-lint-action@v0.14
       with:
-        source: './src'
+        source: './src ./tests'
         extensions: 'c,h,cpp'
         clangFormatVersion: 14
 
@@ -75,3 +75,49 @@ jobs:
         files: |
           ${{github.workspace}}/build/hyperion-webos
           ${{github.workspace}}/build/*.so
+
+  native-tests:
+    # Unit tests run natively with ASan, UBSan and LeakSanitizer against
+    # pbnjson built from webOS OSE (same 2.15 API as the TV). The webOS
+    # toolchain's binaries can't run under qemu-user (old glibc crashes).
+    runs-on: ubuntu-latest
+    env:
+      LIBPBNJSON_REF: eb518b7a0c4706c9191de069992ae49812fc4fbc
+      CMAKE_MODULES_WEBOS_REF: 82f4f25baedfed2ba33c7ee707f898f18da44b19
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq cmake gcc g++ pkg-config libglib2.0-dev libyajl-dev libgmp-dev \
+          liburiparser-dev gperf flex bison lemon ragel libboost-dev libboost-system-dev \
+          libboost-regex-dev libboost-filesystem-dev libboost-program-options-dev
+
+    - name: Cache pbnjson
+      id: cache-pbnjson
+      uses: actions/cache@v4
+      with:
+        path: /opt/pbnjson
+        key: pbnjson-${{ runner.os }}-${{ env.LIBPBNJSON_REF }}-${{ env.CMAKE_MODULES_WEBOS_REF }}
+
+    - name: Build pbnjson
+      if: steps.cache-pbnjson.outputs.cache-hit != 'true'
+      run: |
+        fetch() { mkdir -p "$1" && cd "$1" && git init -q && git fetch -q --depth 1 "$2" "$3" && git checkout -q FETCH_HEAD && cd ..; }
+        cd /tmp
+        fetch cmake-modules-webos https://github.com/webosose/cmake-modules-webos.git "$CMAKE_MODULES_WEBOS_REF"
+        fetch libpbnjson https://github.com/webosose/libpbnjson.git "$LIBPBNJSON_REF"
+        cmake -S cmake-modules-webos -B cmw-build -DCMAKE_INSTALL_PREFIX=/opt/pbnjson
+        cmake --build cmw-build --target install
+        cmake -S libpbnjson -B pbnjson-build -DWEBOS_INSTALL_ROOT=/opt/pbnjson -DCMAKE_MODULE_PATH=/opt/pbnjson/share/cmake/Modules \
+          -DWEBOS_CONFIG_BUILD_TESTS=FALSE -DCMAKE_BUILD_TYPE=Release
+        cmake --build pbnjson-build -j"$(nproc)"
+        cmake --build pbnjson-build --target install
+
+    - name: Run tests
+      run: |
+        export PKG_CONFIG_PATH="$(dirname "$(find /opt/pbnjson -name pbnjson_c.pc | head -1)")"
+        export LD_LIBRARY_PATH="$(dirname "$(find /opt/pbnjson -name 'libpbnjson_c.so' | head -1)")"
+        bash tests/run-host.sh
