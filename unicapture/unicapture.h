@@ -110,8 +110,8 @@ typedef struct _unicapture_state {
         // Written by the capture threads with __atomic stores (32-bit, so
         // reads never tear on ARM). Totals count since unicapture_start.
         uint32_t frames;
-        uint32_t vsyncs; // signals sent by the vsync thread
-        uint32_t wakeups; // signals the capture thread woke up for
+        uint32_t vsyncs; // vsyncs signalled by the vsync thread (under vsync_lock)
+        uint32_t wakeups; // capture loop passes, each using at least one vsync
         uint32_t video_restarts;
         // Average time per frame in each stage over the last 60 frames, in us
         uint32_t wait_us;
