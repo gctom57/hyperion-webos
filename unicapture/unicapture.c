@@ -119,6 +119,7 @@ void* unicapture_vsync_handler(void* data)
             usleep(1000000 / (this->fps == 0 ? 30 : this->fps));
         }
         pthread_mutex_lock(&this->vsync_lock);
+        __atomic_add_fetch(&this->metrics.vsyncs, 1, __ATOMIC_RELAXED);
         pthread_cond_signal(&this->vsync_cond);
         pthread_mutex_unlock(&this->vsync_lock);
     }
@@ -159,6 +160,8 @@ void* unicapture_run(void* data)
     size_t ui_scaled_capacity = 0;
     unsigned int video_fail_count = 0;
     unsigned int ui_mismatch_count = 0;
+    // Stage times summed over the current 60-frame window
+    uint64_t sum_wait = 0, sum_acquire = 0, sum_convert = 0, sum_process = 0, sum_send = 0;
 
     __atomic_store_n(&this->video_restart_requested, false, __ATOMIC_RELEASE);
     this->vsync_thread_running = true;
@@ -200,6 +203,7 @@ void* unicapture_run(void* data)
         pthread_mutex_lock(&this->vsync_lock);
         pthread_cond_wait(&this->vsync_cond, &this->vsync_lock);
         pthread_mutex_unlock(&this->vsync_lock);
+        __atomic_add_fetch(&this->metrics.wakeups, 1, __ATOMIC_RELAXED);
         uint64_t frame_wait = getticks_us();
 
         frame_info_t ui_frame = { PIXFMT_INVALID };
@@ -431,6 +435,7 @@ void* unicapture_run(void* data)
                 INFO("Stopping video capture.");
                 video_capture->terminate(video_capture->state);
                 this->video_capture_running = false;
+                __atomic_add_fetch(&this->metrics.video_restarts, 1, __ATOMIC_RELAXED);
             }
             // Started again at the top of the loop
             __atomic_store_n(&this->video_restart_requested, false, __ATOMIC_RELEASE);
@@ -440,10 +445,22 @@ void* unicapture_run(void* data)
 
         if (got_frame) {
             framecounter += 1;
+            __atomic_add_fetch(&this->metrics.frames, 1, __ATOMIC_RELAXED);
+            sum_wait += frame_wait - frame_start;
+            sum_acquire += frame_acquired - frame_wait;
+            sum_convert += frame_converted - frame_acquired;
+            sum_process += frame_processed - frame_converted;
+            sum_send += frame_sent - frame_processed;
 
             if (framecounter % 60 == 0) {
                 double fps = (60 * 1000000.0) / (getticks_us() - framecounter_start);
                 this->metrics.framerate = fps;
+                __atomic_store_n(&this->metrics.wait_us, (uint32_t)(sum_wait / 60), __ATOMIC_RELAXED);
+                __atomic_store_n(&this->metrics.acquire_us, (uint32_t)(sum_acquire / 60), __ATOMIC_RELAXED);
+                __atomic_store_n(&this->metrics.convert_us, (uint32_t)(sum_convert / 60), __ATOMIC_RELAXED);
+                __atomic_store_n(&this->metrics.process_us, (uint32_t)(sum_process / 60), __ATOMIC_RELAXED);
+                __atomic_store_n(&this->metrics.send_us, (uint32_t)(sum_send / 60), __ATOMIC_RELAXED);
+                sum_wait = sum_acquire = sum_convert = sum_process = sum_send = 0;
                 // One line every ~20 s at 30 fps: with "Setup logging" debug
                 // output goes to the TV's RAM-backed /var/log
                 if (framecounter % 600 == 0) {
@@ -513,6 +530,7 @@ int unicapture_start(unicapture_state_t* this)
         return 1;
     }
 
+    memset(&this->metrics, 0, sizeof(this->metrics));
     this->running = true;
     if (pthread_create(&this->main_thread, NULL, unicapture_run, this) != 0) {
         ERR("Unable to start capture thread");
