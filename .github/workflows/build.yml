@@ -110,11 +110,11 @@ jobs:
         fetch cmake-modules-webos https://github.com/webosose/cmake-modules-webos.git "$CMAKE_MODULES_WEBOS_REF"
         fetch libpbnjson https://github.com/webosose/libpbnjson.git "$LIBPBNJSON_REF"
         cmake -S cmake-modules-webos -B cmw-build -DCMAKE_INSTALL_PREFIX=/opt/pbnjson
-        cmake --build cmw-build --target install
+        sudo cmake --build cmw-build --target install
         cmake -S libpbnjson -B pbnjson-build -DWEBOS_INSTALL_ROOT=/opt/pbnjson -DCMAKE_MODULE_PATH=/opt/pbnjson/share/cmake/Modules \
           -DWEBOS_CONFIG_BUILD_TESTS=FALSE -DCMAKE_BUILD_TYPE=Release
         cmake --build pbnjson-build -j"$(nproc)"
-        cmake --build pbnjson-build --target install
+        sudo cmake --build pbnjson-build --target install
 
     - name: Run tests
       run: |
