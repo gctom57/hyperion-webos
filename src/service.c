@@ -486,8 +486,8 @@ static bool service_caller_allowed(LSHandle* sh, LSMessage* msg)
     LSError lserror;
     LSErrorInit(&lserror);
     jvalue_ref jobj = jobject_create();
-    jobject_set(jobj, j_cstr_to_buffer("returnValue"), jboolean_create(false));
-    jobject_set(jobj, j_cstr_to_buffer("errorText"), jstring_create("Not allowed for this caller"));
+    jobject_put(jobj, J_CSTR_TO_JVAL("returnValue"), jboolean_create(false));
+    jobject_put(jobj, J_CSTR_TO_JVAL("errorText"), jstring_create("Not allowed for this caller"));
     LSMessageReply(sh, msg, jvalue_tostring_simple(jobj), &lserror);
     j_release(&jobj);
     LSErrorFree(&lserror);
@@ -506,7 +506,7 @@ bool service_method_start(LSHandle* sh, LSMessage* msg, void* data)
 
     jvalue_ref jobj = jobject_create();
 
-    jobject_set(jobj, j_cstr_to_buffer("returnValue"), jboolean_create(service_start(service) == 0));
+    jobject_put(jobj, J_CSTR_TO_JVAL("returnValue"), jboolean_create(service_start(service) == 0));
 
     LSMessageReply(sh, msg, jvalue_tostring_simple(jobj), &lserror);
 
@@ -527,7 +527,7 @@ bool service_method_stop(LSHandle* sh, LSMessage* msg, void* data)
 
     jvalue_ref jobj = jobject_create();
 
-    jobject_set(jobj, j_cstr_to_buffer("returnValue"), jboolean_create(service_stop(service) == 0));
+    jobject_put(jobj, J_CSTR_TO_JVAL("returnValue"), jboolean_create(service_stop(service) == 0));
 
     LSMessageReply(sh, msg, jvalue_tostring_simple(jobj), &lserror);
 
@@ -543,18 +543,18 @@ bool service_method_status(LSHandle* sh, LSMessage* msg, void* data)
     LSError lserror;
     LSErrorInit(&lserror);
 
-    jobject_set(jobj, j_cstr_to_buffer("returnValue"), jboolean_create(true));
-    jobject_set(jobj, j_cstr_to_buffer("elevated"), jboolean_create(getuid() == 0));
-    jobject_set(jobj, j_cstr_to_buffer("version"), jstring_create(HYPERION_WEBOS_VERSION));
-    jobject_set(jobj, j_cstr_to_buffer("isRunning"), jboolean_create(service->running));
-    jobject_set(jobj, j_cstr_to_buffer("connected"), jboolean_create(service->connected));
-    jobject_set(jobj, j_cstr_to_buffer("videoBackend"), service->video_backend.name ? jstring_create(service->video_backend.name) : jnull());
-    jobject_set(jobj, j_cstr_to_buffer("videoRunning"), jboolean_create(service->unicapture.video_capture_running));
+    jobject_put(jobj, J_CSTR_TO_JVAL("returnValue"), jboolean_create(true));
+    jobject_put(jobj, J_CSTR_TO_JVAL("elevated"), jboolean_create(getuid() == 0));
+    jobject_put(jobj, J_CSTR_TO_JVAL("version"), jstring_create(HYPERION_WEBOS_VERSION));
+    jobject_put(jobj, J_CSTR_TO_JVAL("isRunning"), jboolean_create(service->running));
+    jobject_put(jobj, J_CSTR_TO_JVAL("connected"), jboolean_create(service->connected));
+    jobject_put(jobj, J_CSTR_TO_JVAL("videoBackend"), service->video_backend.name ? jstring_create(service->video_backend.name) : jnull());
+    jobject_put(jobj, J_CSTR_TO_JVAL("videoRunning"), jboolean_create(service->unicapture.video_capture_running));
     const char* video_error = service_video_error_text(service);
-    jobject_set(jobj, j_cstr_to_buffer("videoError"), video_error ? jstring_create(video_error) : jnull());
-    jobject_set(jobj, j_cstr_to_buffer("uiBackend"), service->ui_backend.name ? jstring_create(service->ui_backend.name) : jnull());
-    jobject_set(jobj, j_cstr_to_buffer("uiRunning"), jboolean_create(service->unicapture.ui_capture_running));
-    jobject_set(jobj, j_cstr_to_buffer("framerate"), jnumber_create_f64(service->unicapture.metrics.framerate));
+    jobject_put(jobj, J_CSTR_TO_JVAL("videoError"), video_error ? jstring_create(video_error) : jnull());
+    jobject_put(jobj, J_CSTR_TO_JVAL("uiBackend"), service->ui_backend.name ? jstring_create(service->ui_backend.name) : jnull());
+    jobject_put(jobj, J_CSTR_TO_JVAL("uiRunning"), jboolean_create(service->unicapture.ui_capture_running));
+    jobject_put(jobj, J_CSTR_TO_JVAL("framerate"), jnumber_create_f64(service->unicapture.metrics.framerate));
 
     LSMessageReply(sh, msg, jvalue_tostring_simple(jobj), &lserror);
 
@@ -571,7 +571,7 @@ bool service_method_get_settings(LSHandle* sh, LSMessage* msg, void* data)
 
     jvalue_ref jobj = jobject_create();
 
-    jobject_set(jobj, j_cstr_to_buffer("returnValue"), jboolean_create(true));
+    jobject_put(jobj, J_CSTR_TO_JVAL("returnValue"), jboolean_create(true));
     settings_save_json(service->settings, jobj);
 
     LSMessageReply(sh, msg, jvalue_tostring_simple(jobj), &lserror);
@@ -599,8 +599,8 @@ bool service_method_set_settings(LSHandle* sh, LSMessage* msg, void* data)
     if (jis_null(parsed) || !jis_object(parsed)) {
         j_release(&parsed);
         jvalue_ref jerr = jobject_create();
-        jobject_set(jerr, j_cstr_to_buffer("returnValue"), jboolean_create(false));
-        jobject_set(jerr, j_cstr_to_buffer("errorText"), jstring_create("Invalid settings payload"));
+        jobject_put(jerr, J_CSTR_TO_JVAL("returnValue"), jboolean_create(false));
+        jobject_put(jerr, J_CSTR_TO_JVAL("errorText"), jstring_create("Invalid settings payload"));
         LSMessageReply(sh, msg, jvalue_tostring_simple(jerr), &lserror);
         j_release(&jerr);
         return true;
@@ -658,7 +658,7 @@ bool service_method_set_settings(LSHandle* sh, LSMessage* msg, void* data)
     }
 
     jvalue_ref jobj = jobject_create();
-    jobject_set(jobj, j_cstr_to_buffer("returnValue"), jboolean_create(res == 0));
+    jobject_put(jobj, J_CSTR_TO_JVAL("returnValue"), jboolean_create(res == 0));
 
     LSMessageReply(sh, msg, jvalue_tostring_simple(jobj), &lserror);
 
@@ -698,8 +698,8 @@ static void reply_error(LSHandle* sh, LSMessage* msg, const char* text)
     LSError lserror;
     LSErrorInit(&lserror);
     jvalue_ref jobj = jobject_create();
-    jobject_set(jobj, j_cstr_to_buffer("returnValue"), jboolean_create(false));
-    jobject_set(jobj, j_cstr_to_buffer("errorText"), jstring_create(text));
+    jobject_put(jobj, J_CSTR_TO_JVAL("returnValue"), jboolean_create(false));
+    jobject_put(jobj, J_CSTR_TO_JVAL("errorText"), jstring_create(text));
     LSMessageReply(sh, msg, jvalue_tostring_simple(jobj), &lserror);
     j_release(&jobj);
     LSErrorFree(&lserror);
@@ -728,15 +728,15 @@ static void* test_receiver_worker(void* data)
     int ret = receiver_test_tcp(call->address, call->port, 2000, err, sizeof(err));
 
     call->reply = jobject_create();
-    jobject_set(call->reply, j_cstr_to_buffer("returnValue"), jboolean_create(true));
-    jobject_set(call->reply, j_cstr_to_buffer("reachable"), jboolean_create(ret == 0));
+    jobject_put(call->reply, J_CSTR_TO_JVAL("returnValue"), jboolean_create(true));
+    jobject_put(call->reply, J_CSTR_TO_JVAL("reachable"), jboolean_create(ret == 0));
     if (ret != 0) {
-        jobject_set(call->reply, j_cstr_to_buffer("errorText"), jstring_create(err));
+        jobject_put(call->reply, J_CSTR_TO_JVAL("errorText"), jstring_create(err));
     } else {
         // Optional: which receiver it is, from its JSON-RPC web port
         AmbientLightingDaemon flavor = DAEMON_NOT_SET;
         if (get_daemon_flavor(call->address, RPC_PORT, &flavor) == 0 && flavor > DAEMON_NOT_SET) {
-            jobject_set(call->reply, j_cstr_to_buffer("flavor"), jstring_create(daemon_to_string(flavor)));
+            jobject_put(call->reply, J_CSTR_TO_JVAL("flavor"), jstring_create(daemon_to_string(flavor)));
         }
     }
     g_idle_add(async_call_reply, call);
@@ -793,14 +793,14 @@ bool service_method_get_preview(LSHandle* sh, LSMessage* msg, void* data __attri
     __atomic_store_n(&preview_wanted_until, getticks_us() + PREVIEW_KEEP_US, __ATOMIC_RELAXED);
 
     jvalue_ref jobj = jobject_create();
-    jobject_set(jobj, j_cstr_to_buffer("returnValue"), jboolean_create(true));
+    jobject_put(jobj, J_CSTR_TO_JVAL("returnValue"), jboolean_create(true));
     pthread_mutex_lock(&preview_lock);
-    jobject_set(jobj, j_cstr_to_buffer("available"), jboolean_create(preview_valid));
+    jobject_put(jobj, J_CSTR_TO_JVAL("available"), jboolean_create(preview_valid));
     if (preview_valid) {
         gchar* b64 = g_base64_encode(preview_rgb, sizeof(preview_rgb));
-        jobject_set(jobj, j_cstr_to_buffer("width"), jnumber_create_i32(PREVIEW_WIDTH));
-        jobject_set(jobj, j_cstr_to_buffer("height"), jnumber_create_i32(PREVIEW_HEIGHT));
-        jobject_set(jobj, j_cstr_to_buffer("rgb"), jstring_create(b64));
+        jobject_put(jobj, J_CSTR_TO_JVAL("width"), jnumber_create_i32(PREVIEW_WIDTH));
+        jobject_put(jobj, J_CSTR_TO_JVAL("height"), jnumber_create_i32(PREVIEW_HEIGHT));
+        jobject_put(jobj, J_CSTR_TO_JVAL("rgb"), jstring_create(b64));
         g_free(b64);
     }
     pthread_mutex_unlock(&preview_lock);

@@ -245,27 +245,27 @@ int settings_load_json(settings_t* settings, jvalue_ref source)
 
 int settings_save_json(settings_t* settings, jvalue_ref target)
 {
-    jobject_set(target, j_cstr_to_buffer("backend"), jstring_create(settings->video_backend));
-    jobject_set(target, j_cstr_to_buffer("uibackend"), jstring_create(settings->ui_backend));
+    jobject_put(target, J_CSTR_TO_JVAL("backend"), jstring_create(settings->video_backend));
+    jobject_put(target, J_CSTR_TO_JVAL("uibackend"), jstring_create(settings->ui_backend));
 
-    jobject_set(target, j_cstr_to_buffer("address"), jstring_create(settings->address));
-    jobject_set(target, j_cstr_to_buffer("port"), jnumber_create_i32(settings->port));
-    jobject_set(target, j_cstr_to_buffer("priority"), jnumber_create_i32(settings->priority));
-    jobject_set(target, j_cstr_to_buffer("unix-socket"), jboolean_create(settings->unix_socket));
+    jobject_put(target, J_CSTR_TO_JVAL("address"), jstring_create(settings->address));
+    jobject_put(target, J_CSTR_TO_JVAL("port"), jnumber_create_i32(settings->port));
+    jobject_put(target, J_CSTR_TO_JVAL("priority"), jnumber_create_i32(settings->priority));
+    jobject_put(target, J_CSTR_TO_JVAL("unix-socket"), jboolean_create(settings->unix_socket));
 
-    jobject_set(target, j_cstr_to_buffer("fps"), jnumber_create_i32(settings->fps));
-    jobject_set(target, j_cstr_to_buffer("width"), jnumber_create_i32(settings->width));
-    jobject_set(target, j_cstr_to_buffer("height"), jnumber_create_i32(settings->height));
-    jobject_set(target, j_cstr_to_buffer("nv12"), jboolean_create(settings->send_nv12));
-    jobject_set(target, j_cstr_to_buffer("quirks"), jnumber_create_i32(settings->quirks));
+    jobject_put(target, J_CSTR_TO_JVAL("fps"), jnumber_create_i32(settings->fps));
+    jobject_put(target, J_CSTR_TO_JVAL("width"), jnumber_create_i32(settings->width));
+    jobject_put(target, J_CSTR_TO_JVAL("height"), jnumber_create_i32(settings->height));
+    jobject_put(target, J_CSTR_TO_JVAL("nv12"), jboolean_create(settings->send_nv12));
+    jobject_put(target, J_CSTR_TO_JVAL("quirks"), jnumber_create_i32(settings->quirks));
 
-    jobject_set(target, j_cstr_to_buffer("vsync"), jboolean_create(settings->vsync));
-    jobject_set(target, j_cstr_to_buffer("novideo"), jboolean_create(settings->no_video));
-    jobject_set(target, j_cstr_to_buffer("nogui"), jboolean_create(settings->no_gui));
-    jobject_set(target, j_cstr_to_buffer("autostart"), jboolean_create(settings->autostart));
+    jobject_put(target, J_CSTR_TO_JVAL("vsync"), jboolean_create(settings->vsync));
+    jobject_put(target, J_CSTR_TO_JVAL("novideo"), jboolean_create(settings->no_video));
+    jobject_put(target, J_CSTR_TO_JVAL("nogui"), jboolean_create(settings->no_gui));
+    jobject_put(target, J_CSTR_TO_JVAL("autostart"), jboolean_create(settings->autostart));
 
-    jobject_set(target, j_cstr_to_buffer("nohdr"), jboolean_create(settings->no_hdr));
-    jobject_set(target, j_cstr_to_buffer("nopowerstate"), jboolean_create(settings->no_powerstate));
+    jobject_put(target, J_CSTR_TO_JVAL("nohdr"), jboolean_create(settings->no_hdr));
+    jobject_put(target, J_CSTR_TO_JVAL("nopowerstate"), jboolean_create(settings->no_powerstate));
 
     return 0;
 }
