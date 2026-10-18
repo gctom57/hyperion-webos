@@ -27,6 +27,12 @@ typedef struct {
     pthread_t connection_thread;
     bool connection_loop_running;
 
+    // Health data for status: start time (main thread only) and totals
+    // updated with __atomic ops by the capture and connection threads
+    uint64_t started_us;
+    uint32_t connects;
+    uint32_t send_errors;
+
     GMainLoop* loop;
 } service_t;
 

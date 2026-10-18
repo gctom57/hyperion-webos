@@ -104,6 +104,7 @@ void* connection_loop(void* data)
         } else {
             INFO("hyperion-client connected!");
             service->connected = true;
+            __atomic_add_fetch(&service->connects, 1, __ATOMIC_RELAXED);
             while (service->connection_loop_running) {
                 if (hyperion_read() < 0) {
                     ERR("Receiver connection lost.");
@@ -184,26 +185,30 @@ static void preview_invalidate(void)
     pthread_mutex_unlock(&preview_lock);
 }
 
-int service_feed_frame(void* data __attribute__((unused)), int width, int height, uint8_t* rgb_data)
+int service_feed_frame(void* data, int width, int height, uint8_t* rgb_data)
 {
+    service_t* service = (service_t*)data;
     int ret;
     if (preview_wanted()) {
         preview_from_rgb(rgb_data, width, height);
     }
     if ((ret = hyperion_set_image(rgb_data, width, height)) != 0) {
+        __atomic_add_fetch(&service->send_errors, 1, __ATOMIC_RELAXED);
         WARN("Frame sending failed: %d", ret);
     }
 
     return 0;
 }
 
-int service_feed_nv12_frame(void* data __attribute__((unused)), int width, int height, uint8_t* y, uint8_t* uv, int stride_y, int stride_uv)
+int service_feed_nv12_frame(void* data, int width, int height, uint8_t* y, uint8_t* uv, int stride_y, int stride_uv)
 {
+    service_t* service = (service_t*)data;
     int ret;
     if (preview_wanted()) {
         preview_from_luma(y, width, height, stride_y);
     }
     if ((ret = hyperion_set_nv12_image(y, uv, width, height, stride_y, stride_uv)) != 0) {
+        __atomic_add_fetch(&service->send_errors, 1, __ATOMIC_RELAXED);
         WARN("Frame sending failed: %d", ret);
     }
 
@@ -213,6 +218,7 @@ int service_feed_nv12_frame(void* data __attribute__((unused)), int width, int h
 int service_init(service_t* service, settings_t* settings)
 {
     service->settings = settings;
+    service->started_us = getticks_us();
 
     unicapture_init(&service->unicapture);
     service->unicapture.vsync = settings->vsync;
@@ -536,6 +542,35 @@ bool service_method_stop(LSHandle* sh, LSMessage* msg, void* data)
     return true;
 }
 
+#define LOAD32(x) jnumber_create_i64(__atomic_load_n(&(x), __ATOMIC_RELAXED))
+
+// Counters for spotting stalls and slow stages without debug logs. Capture
+// totals restart with each start; timings are per frame, averaged over the
+// last 60 frames. vsyncMissed counts vsync signals the capture thread was
+// too busy to see, so a high value means frames are lost to slow stages.
+static jvalue_ref service_health_json(service_t* service)
+{
+    unicapture_state_t* u = &service->unicapture;
+    jvalue_ref health = jobject_create();
+    jobject_put(health, J_CSTR_TO_JVAL("uptime"), jnumber_create_i64((int64_t)((getticks_us() - service->started_us) / 1000000)));
+    jobject_put(health, J_CSTR_TO_JVAL("connects"), LOAD32(service->connects));
+    jobject_put(health, J_CSTR_TO_JVAL("sendErrors"), LOAD32(service->send_errors));
+    jobject_put(health, J_CSTR_TO_JVAL("frames"), LOAD32(u->metrics.frames));
+    uint32_t vsyncs = __atomic_load_n(&u->metrics.vsyncs, __ATOMIC_RELAXED);
+    uint32_t wakeups = __atomic_load_n(&u->metrics.wakeups, __ATOMIC_RELAXED);
+    jobject_put(health, J_CSTR_TO_JVAL("vsyncMissed"), jnumber_create_i64(vsyncs > wakeups ? vsyncs - wakeups : 0));
+    jobject_put(health, J_CSTR_TO_JVAL("videoRestarts"), LOAD32(u->metrics.video_restarts));
+
+    jvalue_ref timing = jobject_create();
+    jobject_put(timing, J_CSTR_TO_JVAL("waitUs"), LOAD32(u->metrics.wait_us));
+    jobject_put(timing, J_CSTR_TO_JVAL("acquireUs"), LOAD32(u->metrics.acquire_us));
+    jobject_put(timing, J_CSTR_TO_JVAL("convertUs"), LOAD32(u->metrics.convert_us));
+    jobject_put(timing, J_CSTR_TO_JVAL("processUs"), LOAD32(u->metrics.process_us));
+    jobject_put(timing, J_CSTR_TO_JVAL("sendUs"), LOAD32(u->metrics.send_us));
+    jobject_put(health, J_CSTR_TO_JVAL("timing"), timing);
+    return health;
+}
+
 bool service_method_status(LSHandle* sh, LSMessage* msg, void* data)
 {
     service_t* service = (service_t*)data;
@@ -555,6 +590,7 @@ bool service_method_status(LSHandle* sh, LSMessage* msg, void* data)
     jobject_put(jobj, J_CSTR_TO_JVAL("uiBackend"), service->ui_backend.name ? jstring_create(service->ui_backend.name) : jnull());
     jobject_put(jobj, J_CSTR_TO_JVAL("uiRunning"), jboolean_create(service->unicapture.ui_capture_running));
     jobject_put(jobj, J_CSTR_TO_JVAL("framerate"), jnumber_create_f64(service->unicapture.metrics.framerate));
+    jobject_put(jobj, J_CSTR_TO_JVAL("health"), service_health_json(service));
 
     LSMessageReply(sh, msg, jvalue_tostring_simple(jobj), &lserror);
 
