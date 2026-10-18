@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "check.h"
@@ -153,6 +154,8 @@ static void test_files(void)
     char tmp[160];
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
     CHECK(access(tmp, F_OK) != 0, "no temp file left after save");
+    struct stat st;
+    CHECK(stat(path, &st) == 0 && (st.st_mode & 0777) == 0600, "saved config readable by its owner only");
 
     settings_t b;
     settings_init(&b);
