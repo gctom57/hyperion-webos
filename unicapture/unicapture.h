@@ -117,6 +117,10 @@ typedef struct _unicapture_state {
         uint32_t wait_us;
         uint32_t acquire_us;
         uint32_t copy_us; // copying the backend frames into ordinary memory
+        // EXPERIMENT: [0] memcpy, [1] libyuv CopyPlane
+        uint32_t exp_ui_acquire_us;
+        uint32_t exp_ui_copy_us[2];
+        uint32_t exp_video_copy_us[2];
         uint32_t convert_us;
         uint32_t process_us;
         uint32_t send_us;

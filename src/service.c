@@ -569,6 +569,13 @@ static jvalue_ref service_health_json(service_t* service)
     jobject_put(timing, J_CSTR_TO_JVAL("processUs"), LOAD32(u->metrics.process_us));
     jobject_put(timing, J_CSTR_TO_JVAL("sendUs"), LOAD32(u->metrics.send_us));
     jobject_put(health, J_CSTR_TO_JVAL("timing"), timing);
+    jvalue_ref exp = jobject_create();
+    jobject_put(exp, J_CSTR_TO_JVAL("uiAcquireUs"), jnumber_create_i64(u->metrics.exp_ui_acquire_us));
+    jobject_put(exp, J_CSTR_TO_JVAL("uiCopyMemcpyUs"), jnumber_create_i64(u->metrics.exp_ui_copy_us[0]));
+    jobject_put(exp, J_CSTR_TO_JVAL("uiCopyNeonUs"), jnumber_create_i64(u->metrics.exp_ui_copy_us[1]));
+    jobject_put(exp, J_CSTR_TO_JVAL("videoCopyMemcpyUs"), jnumber_create_i64(u->metrics.exp_video_copy_us[0]));
+    jobject_put(exp, J_CSTR_TO_JVAL("videoCopyNeonUs"), jnumber_create_i64(u->metrics.exp_video_copy_us[1]));
+    jobject_put(health, J_CSTR_TO_JVAL("exp"), exp);
     return health;
 }
 

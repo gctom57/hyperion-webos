@@ -37,6 +37,9 @@ static void borrow_frame(frame_info_t* output, const frame_info_t* input)
     *output = *input;
 }
 
+// EXPERIMENT: alternate memcpy / libyuv CopyPlane every frame to compare them
+static int exp_copy_method = 0;
+
 // Rows in a plane of a frame `height` high, 0 for a plane the format doesn't use
 static int plane_rows(pixel_format_t format, int plane, int height)
 {
@@ -88,7 +91,11 @@ static int stage_frame(frame_info_t* output, uint8_t** buffers, size_t* capaciti
         if (reserve_buffer(&buffers[i], &capacities[i], size) != 0) {
             return -1;
         }
-        memcpy(buffers[i], input->planes[i].buffer, size);
+        if (exp_copy_method) {
+            CopyPlane(input->planes[i].buffer, input->planes[i].stride, buffers[i], input->planes[i].stride, input->planes[i].stride, rows);
+        } else {
+            memcpy(buffers[i], input->planes[i].buffer, size);
+        }
         staged.planes[i].buffer = buffers[i];
     }
 
@@ -224,6 +231,7 @@ void* unicapture_run(void* data)
     size_t video_staged_capacities[MAX_PLANES] = { 0 };
     unsigned int video_fail_count = 0;
     unsigned int ui_mismatch_count = 0;
+    uint64_t exp_ui_acq = 0, exp_ui_copy[2] = { 0 }, exp_video_copy[2] = { 0 }, exp_n[2] = { 0 };
     // Stage times summed over the current 60-frame window
     uint64_t sum_wait = 0, sum_acquire = 0, sum_copy = 0, sum_convert = 0, sum_process = 0, sum_send = 0;
     uint32_t vsync_seen = 0;
@@ -285,12 +293,14 @@ void* unicapture_run(void* data)
         bool video_restart = __atomic_load_n(&this->video_restart_requested, __ATOMIC_ACQUIRE);
 
         // Capture frames
+        uint64_t exp_t0 = getticks_us();
         if (this->ui_capture_running) {
             if ((ret = ui_capture->acquire_frame(ui_capture->state, &ui_frame)) != 0) {
                 ui_frame.pixel_format = PIXFMT_INVALID;
             }
         }
 
+        uint64_t exp_t1 = getticks_us();
         if (this->video_capture_running && !video_restart) {
             if ((ret = video_capture->acquire_frame(video_capture->state, &video_frame)) != 0) {
                 // Can fail on every frame for a while; don't flood the log
@@ -308,6 +318,7 @@ void* unicapture_run(void* data)
         // Work on copies and hand the backend frames back at once (for
         // DILE_VT this ends the freeze). If a copy fails, the frame is used
         // in place and released after sending as before.
+        exp_copy_method = (int)(framecounter & 1);
         bool ui_released = false;
         bool video_released = false;
         if (ui_frame.pixel_format != PIXFMT_INVALID) {
@@ -317,6 +328,7 @@ void* unicapture_run(void* data)
                 ui_released = true;
             }
         }
+        uint64_t exp_t2 = getticks_us();
         if (video_frame.pixel_format != PIXFMT_INVALID) {
             frame_info_t raw = video_frame;
             if (stage_frame(&video_frame, video_staged, video_staged_capacities, &raw) == 0) {
@@ -326,6 +338,10 @@ void* unicapture_run(void* data)
         }
 
         uint64_t frame_copied = getticks_us();
+        exp_ui_acq += exp_t1 - exp_t0;
+        exp_ui_copy[exp_copy_method] += exp_t2 - frame_acquired;
+        exp_video_copy[exp_copy_method] += frame_copied - exp_t2;
+        exp_n[exp_copy_method]++;
         pixel_format_t target_format = this->target_format;
         pixel_format_t blend_format = (target_format == PIXFMT_RGB || target_format == PIXFMT_ARGB) ? PIXFMT_ARGB : PIXFMT_YUV420_SEMI_PLANAR;
 
@@ -552,6 +568,15 @@ void* unicapture_run(void* data)
                 __atomic_store_n(&this->metrics.wait_us, (uint32_t)(sum_wait / 60), __ATOMIC_RELAXED);
                 __atomic_store_n(&this->metrics.acquire_us, (uint32_t)(sum_acquire / 60), __ATOMIC_RELAXED);
                 __atomic_store_n(&this->metrics.copy_us, (uint32_t)(sum_copy / 60), __ATOMIC_RELAXED);
+                if (exp_n[0] && exp_n[1]) {
+                    this->metrics.exp_ui_acquire_us = (uint32_t)(exp_ui_acq / (exp_n[0] + exp_n[1]));
+                    for (int m = 0; m < 2; m++) {
+                        this->metrics.exp_ui_copy_us[m] = (uint32_t)(exp_ui_copy[m] / exp_n[m]);
+                        this->metrics.exp_video_copy_us[m] = (uint32_t)(exp_video_copy[m] / exp_n[m]);
+                        exp_ui_copy[m] = exp_video_copy[m] = exp_n[m] = 0;
+                    }
+                    exp_ui_acq = 0;
+                }
                 __atomic_store_n(&this->metrics.convert_us, (uint32_t)(sum_convert / 60), __ATOMIC_RELAXED);
                 __atomic_store_n(&this->metrics.process_us, (uint32_t)(sum_process / 60), __ATOMIC_RELAXED);
                 __atomic_store_n(&this->metrics.send_us, (uint32_t)(sum_send / 60), __ATOMIC_RELAXED);
