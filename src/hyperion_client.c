@@ -41,6 +41,47 @@ static const char* _origin = NULL;
 static bool _connected = false;
 static unsigned char recvBuff[1024];
 
+/*
+ * Frames are built in a builder and copied to a buffer that both live across
+ * calls. A new builder and a malloc'd copy for every frame meant two large
+ * allocations per frame, which glibc serves with mmap: fresh, zeroed pages
+ * each time. Only the capture thread sends frames.
+ */
+static flatbuffers_builder_t _frame_builder;
+static bool _frame_builder_ready = false;
+static uint8_t* _frame_buf = NULL;
+static size_t _frame_buf_capacity = 0;
+
+static flatbuffers_builder_t* _frame_begin(void)
+{
+    if (!_frame_builder_ready) {
+        if (flatcc_builder_init(&_frame_builder) != 0) {
+            return NULL;
+        }
+        _frame_builder_ready = true;
+    } else if (flatcc_builder_reset(&_frame_builder) != 0) {
+        return NULL;
+    }
+    return &_frame_builder;
+}
+
+static int _frame_send(flatbuffers_builder_t* B)
+{
+    size_t size = flatcc_builder_get_buffer_size(B);
+    if (size > _frame_buf_capacity) {
+        uint8_t* buf = realloc(_frame_buf, size);
+        if (buf == NULL) {
+            return -1;
+        }
+        _frame_buf = buf;
+        _frame_buf_capacity = size;
+    }
+    if (flatcc_builder_copy_buffer(B, _frame_buf, _frame_buf_capacity) == NULL) {
+        return -1;
+    }
+    return _send_message(_frame_buf, size);
+}
+
 int hyperion_client(const char* origin, const char* hostname, int port, bool unix_socket, int priority)
 {
     int fd = socket(unix_socket ? AF_UNIX : AF_INET, SOCK_STREAM, 0);
@@ -157,35 +198,29 @@ int hyperion_destroy()
 
 int hyperion_set_image(const unsigned char* image, int width, int height)
 {
-    flatbuffers_builder_t B;
-    flatcc_builder_init(&B);
-    flatbuffers_uint8_vec_ref_t imgData = flatcc_builder_create_type_vector(&B, image, width * height * 3);
-    hyperionnet_RawImage_ref_t rawImg = hyperionnet_RawImage_create(&B, imgData, width, height);
-    hyperionnet_Image_ref_t imageReq = hyperionnet_Image_create(&B, hyperionnet_ImageType_as_RawImage(rawImg), -1);
-    hyperionnet_Request_create_as_root(&B, hyperionnet_Command_as_Image(imageReq));
-    size_t size;
-    void* buf = flatcc_builder_finalize_buffer(&B, &size);
-    int ret = _send_message(buf, size);
-    free(buf);
-    flatcc_builder_clear(&B);
-    return ret;
+    flatbuffers_builder_t* B = _frame_begin();
+    if (B == NULL) {
+        return -1;
+    }
+    flatbuffers_uint8_vec_ref_t imgData = flatcc_builder_create_type_vector(B, image, width * height * 3);
+    hyperionnet_RawImage_ref_t rawImg = hyperionnet_RawImage_create(B, imgData, width, height);
+    hyperionnet_Image_ref_t imageReq = hyperionnet_Image_create(B, hyperionnet_ImageType_as_RawImage(rawImg), -1);
+    hyperionnet_Request_create_as_root(B, hyperionnet_Command_as_Image(imageReq));
+    return _frame_send(B);
 }
 
 int hyperion_set_nv12_image(const uint8_t* y, const uint8_t* uv, int width, int height, int stride_y, int stride_uv)
 {
-    flatbuffers_builder_t B;
-    flatcc_builder_init(&B);
-    flatbuffers_uint8_vec_ref_t yData = flatcc_builder_create_type_vector(&B, y, stride_y * height);
-    flatbuffers_uint8_vec_ref_t uvData = flatcc_builder_create_type_vector(&B, uv, stride_uv * height / 2);
-    hyperionnet_RawImage_ref_t nv12Img = hyperionnet_NV12Image_create(&B, yData, uvData, width, height, stride_y, stride_uv);
-    hyperionnet_Image_ref_t imageReq = hyperionnet_Image_create(&B, hyperionnet_ImageType_as_NV12Image(nv12Img), -1);
-    hyperionnet_Request_create_as_root(&B, hyperionnet_Command_as_Image(imageReq));
-    size_t size;
-    void* buf = flatcc_builder_finalize_buffer(&B, &size);
-    int ret = _send_message(buf, size);
-    free(buf);
-    flatcc_builder_clear(&B);
-    return ret;
+    flatbuffers_builder_t* B = _frame_begin();
+    if (B == NULL) {
+        return -1;
+    }
+    flatbuffers_uint8_vec_ref_t yData = flatcc_builder_create_type_vector(B, y, stride_y * height);
+    flatbuffers_uint8_vec_ref_t uvData = flatcc_builder_create_type_vector(B, uv, stride_uv * height / 2);
+    hyperionnet_RawImage_ref_t nv12Img = hyperionnet_NV12Image_create(B, yData, uvData, width, height, stride_y, stride_uv);
+    hyperionnet_Image_ref_t imageReq = hyperionnet_Image_create(B, hyperionnet_ImageType_as_NV12Image(nv12Img), -1);
+    hyperionnet_Request_create_as_root(B, hyperionnet_Command_as_Image(imageReq));
+    return _frame_send(B);
 }
 
 int hyperion_set_register(const char* origin, int priority)

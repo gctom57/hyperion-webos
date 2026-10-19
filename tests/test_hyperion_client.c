@@ -126,7 +126,7 @@ static int is_register(hyperionnet_Request_table_t req, const char* origin, int 
     return strcmp(hyperionnet_Register_origin(reg), origin) == 0 && hyperionnet_Register_priority(reg) == priority;
 }
 
-static int is_frame(hyperionnet_Request_table_t req, const unsigned char* frame)
+static int is_frame_sized(hyperionnet_Request_table_t req, const unsigned char* frame, int width, int height)
 {
     if (req == NULL || hyperionnet_Request_command_type(req) != hyperionnet_Command_Image) {
         return 0;
@@ -137,8 +137,14 @@ static int is_frame(hyperionnet_Request_table_t req, const unsigned char* frame)
     }
     hyperionnet_RawImage_table_t raw = (hyperionnet_RawImage_table_t)hyperionnet_Image_data(img);
     flatbuffers_uint8_vec_t data = hyperionnet_RawImage_data(raw);
-    return hyperionnet_RawImage_width(raw) == WIDTH && hyperionnet_RawImage_height(raw) == HEIGHT
-        && flatbuffers_uint8_vec_len(data) == WIDTH * HEIGHT * 3 && memcmp(data, frame, WIDTH * HEIGHT * 3) == 0;
+    const size_t size = (size_t)width * height * 3;
+    return hyperionnet_RawImage_width(raw) == width && hyperionnet_RawImage_height(raw) == height
+        && flatbuffers_uint8_vec_len(data) == size && memcmp(data, frame, size) == 0;
+}
+
+static int is_frame(hyperionnet_Request_table_t req, const unsigned char* frame)
+{
+    return is_frame_sized(req, frame, WIDTH, HEIGHT);
 }
 
 // Connects and completes the registration handshake; returns the peer or -1
@@ -220,6 +226,16 @@ int main(void)
     CHECK(hyperion_read() == 0, "registered reply read");
     CHECK(hyperion_set_image(frame, WIDTH, HEIGHT) == 0, "frame sent");
     CHECK(is_frame(receive_request(peer), frame), "frame arrives with its size and pixels");
+
+    // Frames reuse one builder and buffer: nothing may carry over between them
+    unsigned char small[8 * 4 * 3];
+    for (size_t i = 0; i < sizeof(small); i++) {
+        small[i] = (unsigned char)(255 - i);
+    }
+    CHECK(hyperion_set_image(small, 8, 4) == 0, "smaller frame sent");
+    CHECK(is_frame_sized(receive_request(peer), small, 8, 4), "smaller frame arrives intact after a larger one");
+    hyperion_set_image(frame, WIDTH, HEIGHT);
+    CHECK(is_frame(receive_request(peer), frame), "larger frame arrives intact after a smaller one");
 
     send_reply(peer, NULL, -1, 2);
     CHECK(hyperion_read() == 0, "video mode reply read");
