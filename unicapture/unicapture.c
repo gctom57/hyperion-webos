@@ -226,6 +226,7 @@ void* unicapture_run(void* data)
     unsigned int ui_pass = 0;
     unsigned int video_fail_count = 0;
     unsigned int ui_mismatch_count = 0;
+    unsigned int no_frame_count = 0;
     // Stage times summed over the current 60-frame window
     uint64_t sum_wait = 0, sum_acquire = 0, sum_copy = 0, sum_convert = 0, sum_process = 0, sum_send = 0;
     uint32_t vsync_seen = 0;
@@ -490,8 +491,9 @@ void* unicapture_run(void* data)
             } else if (converter_run(&final_converter, &video_frame_converted, &final_frame, target_format) != 0) {
                 final_frame.pixel_format = PIXFMT_INVALID;
             }
-        } else {
-            WARN("No valid frame to send...");
+        } else if (no_frame_count++ % 300 == 0) {
+            // Every pass while neither capture works: don't flood the log
+            WARN("No valid frame to send (%u times)", no_frame_count);
         }
 
         // Never send a frame that wasn't produced in this iteration: earlier
@@ -555,6 +557,7 @@ void* unicapture_run(void* data)
         uint64_t frame_released = getticks_us();
 
         if (got_frame) {
+            no_frame_count = 0;
             framecounter += 1;
             __atomic_add_fetch(&this->metrics.frames, 1, __ATOMIC_RELAXED);
             sum_wait += frame_wait - frame_start;
