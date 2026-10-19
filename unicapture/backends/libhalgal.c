@@ -14,6 +14,7 @@ typedef struct _halgal_backend_state {
     size_t num_bytes;
     char* mem_addr;
     int mem_fd;
+    unsigned int fail_count;
 } halgal_backend_state_t;
 
 int capture_init(cap_backend_config_t* config, void** state_p)
@@ -124,10 +125,13 @@ int capture_acquire_frame(void* state, frame_info_t* frame)
     int ret = 0;
 
     if ((ret = HAL_GAL_CaptureFrameBuffer(&this->surface_info)) != 0) {
-
-        ERR("HAL_GAL_CaptureFrameBuffer failed: %x", ret);
+        // Called for every frame: don't flood the log while it keeps failing
+        if (this->fail_count++ % 300 == 0) {
+            ERR("HAL_GAL_CaptureFrameBuffer failed: %x (%u times)", ret, this->fail_count);
+        }
         return ret;
     }
+    this->fail_count = 0;
 
     frame->pixel_format = PIXFMT_ARGB;
     frame->width = this->width;
