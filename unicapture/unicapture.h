@@ -83,6 +83,7 @@ typedef struct _unicapture_state {
     capture_backend_t* video_capture;
 
     bool vsync;
+    int ui_interval; // with video, capture the UI layer every this many frames
     uint32_t fps;
     pixel_format_t target_format;
 
