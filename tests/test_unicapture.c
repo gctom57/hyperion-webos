@@ -75,6 +75,39 @@ static int fake_release(void* state, frame_info_t* frame)
     return 0;
 }
 
+// Fake UI layer: opaque, so a blended frame shows only its colour. libyuv
+// ARGB is B, G, R, A in memory.
+static uint8_t ui_pixels[WIDTH * HEIGHT * 4];
+static int ui_acquired = 0, ui_released = 0;
+static int expect_ui = 0;
+
+static int fake_ui_acquire(void* state, frame_info_t* frame)
+{
+    (void)state;
+    for (size_t i = 0; i < sizeof(ui_pixels); i += 4) {
+        ui_pixels[i] = 0x10;
+        ui_pixels[i + 1] = 0x20;
+        ui_pixels[i + 2] = 0x30;
+        ui_pixels[i + 3] = 0xFF;
+    }
+    frame->pixel_format = PIXFMT_ARGB;
+    frame->width = WIDTH;
+    frame->height = HEIGHT;
+    frame->planes[0].buffer = ui_pixels;
+    frame->planes[0].stride = WIDTH * 4;
+    __atomic_add_fetch(&ui_acquired, 1, __ATOMIC_RELAXED);
+    return 0;
+}
+
+static int fake_ui_release(void* state, frame_info_t* frame)
+{
+    (void)state;
+    (void)frame;
+    memset(ui_pixels, 0, sizeof(ui_pixels));
+    __atomic_add_fetch(&ui_released, 1, __ATOMIC_RELAXED);
+    return 0;
+}
+
 static int frames_received = 0;
 static int frames_unreleased = 0;
 static int frames_wrong = 0;
@@ -84,7 +117,13 @@ static int slow_receiver(void* data, int width, int height, uint8_t* rgb)
     (void)data;
     if (width == WIDTH && height == HEIGHT && rgb != NULL) {
         frames_received++;
-        if (rgb[0] != 0x80 || rgb[WIDTH * HEIGHT * 3 - 1] != 0x80) {
+        const uint8_t* last = rgb + WIDTH * HEIGHT * 3 - 3;
+        if (expect_ui) {
+            // The UI colour, whichever order the RGB conversion writes
+            if (last[1] != 0x20 || (last[0] != 0x10 && last[0] != 0x30) || last[0] + last[2] != 0x40) {
+                frames_wrong++;
+            }
+        } else if (rgb[0] != 0x80 || last[2] != 0x80) {
             frames_wrong++;
         }
     }
@@ -98,12 +137,13 @@ static int slow_receiver(void* data, int width, int height, uint8_t* rgb)
 }
 
 // Captures for `seconds` with the given send delay and returns the frame rate
-static double run(unicapture_state_t* u, capture_backend_t* video, int delay_us, double seconds, uint32_t* missed)
+static double run_with_ui(unicapture_state_t* u, capture_backend_t* video, capture_backend_t* ui, int delay_us, double seconds, uint32_t* missed)
 {
     send_delay_us = delay_us;
     frames_received = 0;
     unicapture_init(u);
     u->video_capture = video;
+    u->ui_capture = ui;
     u->target_format = PIXFMT_RGB;
     u->callback = slow_receiver;
     unicapture_start(u);
@@ -119,6 +159,11 @@ static double run(unicapture_state_t* u, capture_backend_t* video, int delay_us,
     unicapture_stop(u);
     double elapsed = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
     return frames / elapsed;
+}
+
+static double run(unicapture_state_t* u, capture_backend_t* video, int delay_us, double seconds, uint32_t* missed)
+{
+    return run_with_ui(u, video, NULL, delay_us, seconds, missed);
 }
 
 int main(void)
@@ -153,6 +198,41 @@ int main(void)
     CHECK(missed > 0, "vsyncs that pass during a slow frame are counted as missed");
 
     CHECK(acquired == released, "every acquired frame is released");
+
+    // With video, the UI layer is captured every third frame and its last
+    // copy reused in between: still 30 fps, and every frame shows the UI
+    capture_backend_t ui = {
+        .name = "fake-ui",
+        .start = fake_start,
+        .terminate = fake_terminate,
+        .acquire_frame = fake_ui_acquire,
+        .release_frame = fake_ui_release,
+    };
+    expect_ui = 1;
+    frames_wrong = 0;
+    int video_before = acquired;
+    double with_ui = run_with_ui(&u, &video, &ui, 2000, 2.0, &missed);
+    int video_frames = acquired - video_before;
+    printf("with UI: %.1f fps, %d video and %d UI captures\n", with_ui, video_frames, ui_acquired);
+    CHECK(with_ui > 26, "UI capture every third frame keeps 30 fps");
+    CHECK(frames_received > 0 && frames_wrong == 0, "every frame shows the UI, including reused copies");
+    CHECK(ui_acquired * 3 >= video_frames - 3 && ui_acquired * 3 <= video_frames + 6, "UI captured every third frame");
+    CHECK(ui_acquired == ui_released, "every UI capture is released");
+
+    // UI on its own (no video): every pass
+    expect_ui = 1;
+    int ui_before = ui_acquired;
+    unicapture_init(&u);
+    u.ui_capture = &ui;
+    u.target_format = PIXFMT_RGB;
+    u.callback = slow_receiver;
+    u.fps = 30;
+    frames_received = 0;
+    unicapture_start(&u);
+    usleep(1000000);
+    unicapture_stop(&u);
+    printf("UI only: %d frames, %d UI captures\n", frames_received, ui_acquired - ui_before);
+    CHECK(frames_received > 5 && ui_acquired - ui_before >= frames_received, "without video the UI is captured every frame");
 
     return check_summary();
 }

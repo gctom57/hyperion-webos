@@ -222,6 +222,8 @@ void* unicapture_run(void* data)
     size_t ui_staged_capacities[MAX_PLANES] = { 0 };
     uint8_t* video_staged[MAX_PLANES] = { NULL };
     size_t video_staged_capacities[MAX_PLANES] = { 0 };
+    frame_info_t ui_last = { PIXFMT_INVALID };
+    unsigned int ui_pass = 0;
     unsigned int video_fail_count = 0;
     unsigned int ui_mismatch_count = 0;
     // Stage times summed over the current 60-frame window
@@ -284,11 +286,25 @@ void* unicapture_run(void* data)
         frame_info_t final_frame = { PIXFMT_INVALID };
         bool video_restart = __atomic_load_n(&this->video_restart_requested, __ATOMIC_ACQUIRE);
 
-        // Capture frames
+        // Capture frames. Grabbing the UI layer costs more than the video on
+        // DILE_VT TVs (C7: ~5 ms to capture and ~4.5 ms to copy, against
+        // ~2 ms for the video) and it rarely changes, so alongside video it is
+        // captured every ui_interval passes and the last copy is reused in
+        // between. On its own it is captured every pass.
+        bool ui_reused = false;
         if (this->ui_capture_running) {
-            if ((ret = ui_capture->acquire_frame(ui_capture->state, &ui_frame)) != 0) {
+            const bool ui_due = !this->video_capture_running || this->ui_interval <= 1
+                || ui_last.pixel_format == PIXFMT_INVALID || ui_pass % (unsigned int)this->ui_interval == 0;
+            ui_pass++;
+            if (!ui_due) {
+                ui_frame = ui_last;
+                ui_reused = true;
+            } else if ((ret = ui_capture->acquire_frame(ui_capture->state, &ui_frame)) != 0) {
                 ui_frame.pixel_format = PIXFMT_INVALID;
             }
+        }
+        if (!ui_reused) {
+            ui_last.pixel_format = PIXFMT_INVALID;
         }
 
         if (this->video_capture_running && !video_restart) {
@@ -308,13 +324,15 @@ void* unicapture_run(void* data)
         // Work on copies and hand the backend frames back at once (for
         // DILE_VT this ends the freeze). If a copy fails, the frame is used
         // in place and released after sending as before.
-        bool ui_released = false;
+        bool ui_released = ui_reused;
         bool video_released = false;
-        if (ui_frame.pixel_format != PIXFMT_INVALID) {
+        if (ui_frame.pixel_format != PIXFMT_INVALID && !ui_reused) {
             frame_info_t raw = ui_frame;
             if (stage_frame(&ui_frame, ui_staged, ui_staged_capacities, &raw) == 0) {
                 ui_capture->release_frame(ui_capture->state, &raw);
                 ui_released = true;
+                // Only a copy can be reused: the backend's frame is gone
+                ui_last = ui_frame;
             }
         }
         if (video_frame.pixel_format != PIXFMT_INVALID) {
@@ -622,6 +640,7 @@ void unicapture_init(unicapture_state_t* this)
 {
     memset(this, 0, sizeof(unicapture_state_t));
     this->vsync = true;
+    this->ui_interval = 3;
 }
 
 int unicapture_start(unicapture_state_t* this)
