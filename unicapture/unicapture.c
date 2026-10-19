@@ -37,6 +37,65 @@ static void borrow_frame(frame_info_t* output, const frame_info_t* input)
     *output = *input;
 }
 
+// Rows in a plane of a frame `height` high, 0 for a plane the format doesn't use
+static int plane_rows(pixel_format_t format, int plane, int height)
+{
+    switch (format) {
+    case PIXFMT_RGB:
+    case PIXFMT_ABGR:
+    case PIXFMT_ARGB:
+    case PIXFMT_YUV420_INTERLEAVED:
+    case PIXFMT_YUV422_INTERLEAVED:
+    case PIXFMT_YUV444_INTERLEAVED:
+        return plane == 0 ? height : 0;
+    case PIXFMT_YUV420_SEMI_PLANAR:
+        return plane == 0 ? height : plane == 1 ? (height + 1) / 2 : 0;
+    case PIXFMT_YUV422_SEMI_PLANAR:
+    case PIXFMT_YUV444_SEMI_PLANAR:
+        return plane < 2 ? height : 0;
+    case PIXFMT_YUV420_PLANAR:
+        return plane == 0 ? height : plane < 3 ? (height + 1) / 2 : 0;
+    case PIXFMT_YUV422_PLANAR:
+    case PIXFMT_YUV444_PLANAR:
+        return plane < 3 ? height : 0;
+    default:
+        return 0;
+    }
+}
+
+// Backend frames live in driver memory that is mapped uncached (DILE_VT maps
+// /dev/mem with O_SYNC), where every read is slow, and the conversion and
+// blend passes read each pixel several times. Copy each plane once, in one
+// sequential pass, into ordinary memory and work on that copy. The backend
+// frame can then be released right away.
+static int stage_frame(frame_info_t* output, uint8_t** buffers, size_t* capacities, const frame_info_t* input)
+{
+    if (plane_rows(input->pixel_format, 0, input->height) == 0) {
+        return -1;
+    }
+
+    frame_info_t staged = *input;
+    for (int i = 0; i < MAX_PLANES; i++) {
+        const int rows = plane_rows(input->pixel_format, i, input->height);
+        if (rows == 0) {
+            staged.planes[i].buffer = NULL;
+            continue;
+        }
+        if (input->planes[i].buffer == NULL || input->planes[i].stride <= 0) {
+            return -1;
+        }
+        const size_t size = (size_t)input->planes[i].stride * rows;
+        if (reserve_buffer(&buffers[i], &capacities[i], size) != 0) {
+            return -1;
+        }
+        memcpy(buffers[i], input->planes[i].buffer, size);
+        staged.planes[i].buffer = buffers[i];
+    }
+
+    *output = staged;
+    return 0;
+}
+
 int unicapture_init_backend(cap_backend_config_t* config, capture_backend_t* backend, const char* name)
 {
     char* error;
@@ -159,10 +218,14 @@ void* unicapture_run(void* data)
     size_t blend_alpha_y_capacity = 0;
     uint8_t* ui_scaled = NULL;
     size_t ui_scaled_capacity = 0;
+    uint8_t* ui_staged[MAX_PLANES] = { NULL };
+    size_t ui_staged_capacities[MAX_PLANES] = { 0 };
+    uint8_t* video_staged[MAX_PLANES] = { NULL };
+    size_t video_staged_capacities[MAX_PLANES] = { 0 };
     unsigned int video_fail_count = 0;
     unsigned int ui_mismatch_count = 0;
     // Stage times summed over the current 60-frame window
-    uint64_t sum_wait = 0, sum_acquire = 0, sum_convert = 0, sum_process = 0, sum_send = 0;
+    uint64_t sum_wait = 0, sum_acquire = 0, sum_copy = 0, sum_convert = 0, sum_process = 0, sum_send = 0;
     uint32_t vsync_seen = 0;
 
     __atomic_store_n(&this->video_restart_requested, false, __ATOMIC_RELEASE);
@@ -241,6 +304,28 @@ void* unicapture_run(void* data)
         }
 
         uint64_t frame_acquired = getticks_us();
+
+        // Work on copies and hand the backend frames back at once (for
+        // DILE_VT this ends the freeze). If a copy fails, the frame is used
+        // in place and released after sending as before.
+        bool ui_released = false;
+        bool video_released = false;
+        if (ui_frame.pixel_format != PIXFMT_INVALID) {
+            frame_info_t raw = ui_frame;
+            if (stage_frame(&ui_frame, ui_staged, ui_staged_capacities, &raw) == 0) {
+                ui_capture->release_frame(ui_capture->state, &raw);
+                ui_released = true;
+            }
+        }
+        if (video_frame.pixel_format != PIXFMT_INVALID) {
+            frame_info_t raw = video_frame;
+            if (stage_frame(&video_frame, video_staged, video_staged_capacities, &raw) == 0) {
+                video_capture->release_frame(video_capture->state, &raw);
+                video_released = true;
+            }
+        }
+
+        uint64_t frame_copied = getticks_us();
         pixel_format_t target_format = this->target_format;
         pixel_format_t blend_format = (target_format == PIXFMT_RGB || target_format == PIXFMT_ARGB) ? PIXFMT_ARGB : PIXFMT_YUV420_SEMI_PLANAR;
 
@@ -430,11 +515,11 @@ void* unicapture_run(void* data)
 
         uint64_t frame_sent = getticks_us();
 
-        if (ui_frame.pixel_format != PIXFMT_INVALID) {
+        if (ui_frame.pixel_format != PIXFMT_INVALID && !ui_released) {
             ui_capture->release_frame(ui_capture->state, &ui_frame);
         }
 
-        if (video_frame.pixel_format != PIXFMT_INVALID) {
+        if (video_frame.pixel_format != PIXFMT_INVALID && !video_released) {
             video_capture->release_frame(video_capture->state, &video_frame);
         }
 
@@ -456,7 +541,8 @@ void* unicapture_run(void* data)
             __atomic_add_fetch(&this->metrics.frames, 1, __ATOMIC_RELAXED);
             sum_wait += frame_wait - frame_start;
             sum_acquire += frame_acquired - frame_wait;
-            sum_convert += frame_converted - frame_acquired;
+            sum_copy += frame_copied - frame_acquired;
+            sum_convert += frame_converted - frame_copied;
             sum_process += frame_processed - frame_converted;
             sum_send += frame_sent - frame_processed;
 
@@ -465,17 +551,18 @@ void* unicapture_run(void* data)
                 this->metrics.framerate = fps;
                 __atomic_store_n(&this->metrics.wait_us, (uint32_t)(sum_wait / 60), __ATOMIC_RELAXED);
                 __atomic_store_n(&this->metrics.acquire_us, (uint32_t)(sum_acquire / 60), __ATOMIC_RELAXED);
+                __atomic_store_n(&this->metrics.copy_us, (uint32_t)(sum_copy / 60), __ATOMIC_RELAXED);
                 __atomic_store_n(&this->metrics.convert_us, (uint32_t)(sum_convert / 60), __ATOMIC_RELAXED);
                 __atomic_store_n(&this->metrics.process_us, (uint32_t)(sum_process / 60), __ATOMIC_RELAXED);
                 __atomic_store_n(&this->metrics.send_us, (uint32_t)(sum_send / 60), __ATOMIC_RELAXED);
-                sum_wait = sum_acquire = sum_convert = sum_process = sum_send = 0;
+                sum_wait = sum_acquire = sum_copy = sum_convert = sum_process = sum_send = 0;
                 // One line every ~20 s at 30 fps: with "Setup logging" debug
                 // output goes to the TV's RAM-backed /var/log
                 if (framecounter % 600 == 0) {
-                    DBG("%.1f fps; us wait %" PRIu64 " acquire %" PRIu64 " convert %" PRIu64 " process %" PRIu64 " send %" PRIu64
+                    DBG("%.1f fps; us wait %" PRIu64 " acquire %" PRIu64 " copy %" PRIu64 " convert %" PRIu64 " process %" PRIu64 " send %" PRIu64
                         " release %" PRIu64 "; "
                         "UI fmt %d %dx%d -> %dx%d; video fmt %d %dx%d -> %dx%d",
-                        fps, frame_wait - frame_start, frame_acquired - frame_wait, frame_converted - frame_acquired,
+                        fps, frame_wait - frame_start, frame_acquired - frame_wait, frame_copied - frame_acquired, frame_converted - frame_copied,
                         frame_processed - frame_converted, frame_sent - frame_processed, frame_released - frame_sent,
                         ui_frame.pixel_format, ui_frame.width, ui_frame.height, ui_frame_converted.width, ui_frame_converted.height,
                         video_frame.pixel_format, video_frame.width, video_frame.height, video_frame_converted.width, video_frame_converted.height);
@@ -515,6 +602,10 @@ void* unicapture_run(void* data)
     }
     free(blend_alpha_y);
     free(ui_scaled);
+    for (int i = 0; i < MAX_PLANES; i++) {
+        free(ui_staged[i]);
+        free(video_staged[i]);
+    }
 
     pthread_cond_destroy(&this->vsync_cond);
     pthread_mutex_destroy(&this->vsync_lock);

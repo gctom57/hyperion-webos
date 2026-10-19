@@ -2,6 +2,8 @@
 // (like DILE_VT with framerate divider 2) and a receiver that is slow to take
 // frames. A frame that takes longer than one vsync period must not cost an
 // extra period: 40 ms per frame should give about 25 fps, not 15.
+// The backend frame is handed back before sending and the driver may reuse it
+// at once, so what is sent must come from unicapture's own copy.
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -53,6 +55,7 @@ static int fake_wait(void* state)
 static int fake_acquire(void* state, frame_info_t* frame)
 {
     (void)state;
+    memset(pixels, 0x80, sizeof(pixels));
     frame->pixel_format = PIXFMT_ARGB;
     frame->width = WIDTH;
     frame->height = HEIGHT;
@@ -66,17 +69,27 @@ static int fake_release(void* state, frame_info_t* frame)
 {
     (void)state;
     (void)frame;
+    // The driver writes the next picture into it
+    memset(pixels, 0, sizeof(pixels));
     __atomic_add_fetch(&released, 1, __ATOMIC_RELAXED);
     return 0;
 }
 
 static int frames_received = 0;
+static int frames_unreleased = 0;
+static int frames_wrong = 0;
 
 static int slow_receiver(void* data, int width, int height, uint8_t* rgb)
 {
     (void)data;
     if (width == WIDTH && height == HEIGHT && rgb != NULL) {
         frames_received++;
+        if (rgb[0] != 0x80 || rgb[WIDTH * HEIGHT * 3 - 1] != 0x80) {
+            frames_wrong++;
+        }
+    }
+    if (__atomic_load_n(&acquired, __ATOMIC_RELAXED) != __atomic_load_n(&released, __ATOMIC_RELAXED)) {
+        frames_unreleased++;
     }
     if (send_delay_us > 0) {
         usleep(send_delay_us);
@@ -126,6 +139,8 @@ int main(void)
     printf("fast receiver: %.1f fps, %u vsyncs missed\n", fast, missed);
     CHECK(fast > 26 && fast < 32, "fast receiver keeps the 30 Hz vsync rate");
     CHECK(frames_received > 0, "frames reach the receiver callback as RGB");
+    CHECK(frames_unreleased == 0, "the backend frame is released before sending");
+    CHECK(frames_wrong == 0, "the sent picture comes from the copy, not the released frame");
 
     double slow = run(&u, &video, 40000, 3.0, &missed);
     printf("40 ms receiver: %.1f fps, %u vsyncs missed\n", slow, missed);
