@@ -116,6 +116,7 @@ typedef struct _unicapture_state {
         // Average time per frame in each stage over the last 60 frames, in us
         uint32_t wait_us;
         uint32_t acquire_us;
+        uint32_t copy_us; // copying the backend frames into ordinary memory
         uint32_t convert_us;
         uint32_t process_us;
         uint32_t send_us;

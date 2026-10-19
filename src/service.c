@@ -564,6 +564,7 @@ static jvalue_ref service_health_json(service_t* service)
     jvalue_ref timing = jobject_create();
     jobject_put(timing, J_CSTR_TO_JVAL("waitUs"), LOAD32(u->metrics.wait_us));
     jobject_put(timing, J_CSTR_TO_JVAL("acquireUs"), LOAD32(u->metrics.acquire_us));
+    jobject_put(timing, J_CSTR_TO_JVAL("copyUs"), LOAD32(u->metrics.copy_us));
     jobject_put(timing, J_CSTR_TO_JVAL("convertUs"), LOAD32(u->metrics.convert_us));
     jobject_put(timing, J_CSTR_TO_JVAL("processUs"), LOAD32(u->metrics.process_us));
     jobject_put(timing, J_CSTR_TO_JVAL("sendUs"), LOAD32(u->metrics.send_us));
